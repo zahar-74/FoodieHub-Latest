@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub — Admin Dashboard</title>
+    <link rel="stylesheet" href="/public/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub Admin</div>
+            <ul class="nav-links">
+                <li><a href="admin-dashboard.html">Dashboard</a></li>
+                <li><a href="admin-orders.html">Manage Orders</a></li>
+                <li><a href="admin-menu-manage.html">Manage Menu</a></li>
+                <li><a href="index.html">View Site</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <h1>Admin Dashboard</h1>
+        <section id="stats">
+            <div class="stat-card">
+                <h3>Total Orders</h3>
+                <span id="total-orders">0</span>
+            </div>
+            <div class="stat-card">
+                <h3>Revenue</h3>
+                <span id="total-revenue">$0</span>
+            </div>
+            <div class="stat-card">
+                <h3>Pending Orders</h3>
+                <span id="pending-orders">0</span>
+            </div>
+        </section>
+
+        <section>
+            <h2>Recent Orders</h2>
+            <table id="admin-orders-table">
+                <thead>
+                    <tr>
+                        <th>Order ID</th>
+                        <th>Customer</th>
+                        <th>Items</th>
+                        <th>Total</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- admin.js populates this -->
+                </tbody>
+            </table>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 FoodieHub Admin</p>
+    </footer>
+
+    <script src="/public/js/menu.js"></script>
+    <script src="/public/js/cart.js"></script>
+    <script src="/public/js/validation.js"></script>
+    <script src="/public/js/admin.js"></script>
+    <script src="/public/js/fetch.js"></script>
+</body>
+
+</html>

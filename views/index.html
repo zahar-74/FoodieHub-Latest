@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub — Menu</title>
+    <link rel="stylesheet" href="/public/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="index.html">Menu</a></li>
+                <li><a href="cart.html">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="order-history.html">My Orders</a></li>
+                <li><a href="login.html">Login</a></li>
+                <li><a href="admin-dashboard.html">Admin</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section class="hero">
+            <h1>Dive In To The Menu that fulfills your cravings</h1>
+        </section>
+
+        <section class="filters">
+            <div class="filter-group">
+                <label for="category-filter">Category</label>
+                <select id="category-filter">
+                    <option value="all">All</option>
+                    <option value="Burgers">Burgers</option>
+                    <option value="Desserts">Desserts</option>
+                    <option value="Drinks">Drinks</option>
+                    <option value="Pasta">Pasta</option>
+                    <option value="Pizza">Pizza</option>
+                    <option value="Salads">Salads</option>
+                </select>
+            </div>
+
+            <div class="filter-group price-group">
+                <label for="price-filter">Max Price</label>
+                <input type="range" id="price-filter" min="0" max="50" value="50">
+                <span id="price-filter-value">$50</span>
+            </div>
+
+            <div class="filter-group">
+                <label for="diet-filter">Dietary</label>
+                <select id="diet-filter">
+                    <option value="all">All</option>
+                    <option value="vegetarian">Vegetarian</option>
+                    <option value="vegan">Vegan</option>
+                    <option value="gluten-free">Gluten-Free</option>
+                </select>
+            </div>
+        </section>
+
+        <section id="menu-grid">
+            <!-- menu.js + fetch.js populate this -->
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 FoodieHub. Built with Hunger and Passion.</p>
+    </footer>
+
+    <script src="/public/js/menu.js"></script>
+    <script src="/public/js/cart.js"></script>
+    <script src="/public/js/validation.js"></script>
+    <script src="/public/js/admin.js"></script>
+    <script src="/public/js/fetch.js"></script>
+</body>
+
+</html>
