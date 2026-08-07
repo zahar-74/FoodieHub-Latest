@@ -29,7 +29,8 @@ app.use('/menu', require('./routes/menu'));           // Track 1 ✅ (Omar)
 app.use('/', require('./routes/auth'));               // Track 3 ✅ (Marwan)
 app.use('/', require('./routes/adminUsers'));         // Track 3 ✅ (Marwan)
 // app.use('/admin', require('./routes/adminOrders'));   // Track 4
-// app.use('/', require('./routes/reviews'));            // Track 5
+app.use('/', require('./routes/reviews'));              // Track 5 ✅ (Yassin)
+app.use('/', require('./routes/orderHistory'));         // Track 5 ✅ (Yassin)
 
 // ---- Centralized error handler (MUST BE LAST) ----
 app.use((err, req, res, next) => {
