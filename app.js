@@ -20,14 +20,14 @@ mongoose.connect(process.env.MONGO_URL)
     .then(() => console.log('MongoDB connected'))
     .catch(err => console.error('MongoDB connection error:', err));
 
-// ---- Routes (will be uncommented as each track is added) ----
+// ---- Routes ----
 app.get('/', (req, res) => {
     res.render('index');
 });
-// app.use('/menu', require('./routes/menu'));           // Track 1
+app.use('/menu', require('./routes/menu'));           // Track 1 ✅ (Omar)
 // app.use('/orders', require('./routes/orders'));       // Track 2
-app.use('/', require('./routes/auth'));               // Track 3
-app.use('/', require('./routes/adminUsers'));
+app.use('/', require('./routes/auth'));               // Track 3 ✅ (Marwan)
+app.use('/', require('./routes/adminUsers'));         // Track 3 ✅ (Marwan)
 // app.use('/admin', require('./routes/adminOrders'));   // Track 4
 // app.use('/', require('./routes/reviews'));            // Track 5
 
