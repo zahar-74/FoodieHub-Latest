@@ -37,10 +37,8 @@ function validateRegister() {
     let valid = true;
     const name = document.getElementById('register-name');
     const email = document.getElementById('register-email');
-    const phone = document.getElementById('register-phone');
     const password = document.getElementById('register-password');
     const emailPattern = /^[^\s@]+@[^\s@]+\.[a-z]{2,3}$/;
-    const phonePattern = /^\d{10}$/;
 
     if (!name || name.value.trim() === '') {
         const error = document.getElementById('register-name-error');
@@ -56,12 +54,6 @@ function validateRegister() {
         valid = false;
     }
 
-    if (!phone || !phonePattern.test(phone.value)) {
-        const error = document.getElementById('register-phone-error');
-        if (error) error.textContent = 'Please enter a valid 10-digit phone number.';
-        if (phone) phone.classList.add('invalid');
-        valid = false;
-    }
 
     if (!password || password.value.length < 6) {
         const error = document.getElementById('register-password-error');
@@ -93,10 +85,10 @@ function validateCheckout() {
         }
     }
 
-    if (cart && cart.length === 0) {
-        alert('Your cart is empty.');
-        valid = false;
-    }
+    if (typeof cart !== 'undefined' && cart.length === 0) {
+    alert('Your cart is empty.');
+    valid = false;
+}
 
     if (valid) {
         alert('Order placed successfully! (Demo mode)');
