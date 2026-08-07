@@ -18,8 +18,9 @@
     "url": "https://github.com/zahar-74/FoodieHub-Latest/issues"
   },
   "homepage": "https://github.com/zahar-74/FoodieHub-Latest#readme",
-  "dependencies": {
+ "dependencies": {
     "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.6",
     "dotenv": "^17.4.2",
     "ejs": "^6.0.1",
     "express": "^5.2.1",
