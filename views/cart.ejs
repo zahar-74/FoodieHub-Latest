@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub - Cart</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li class="admin-only"><a href="/admin">Dashboard</a></li>
+                <li class="admin-only"><a href="/admin/menu">Manage Menu</a></li>
+                <li id="nav-login-item"><a href="/login">Login</a></li>
+                <li id="nav-register-item"><a href="/register">Register</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main>
+        <div class="cart-heading">
+            <h1>Your Cart</h1>
+            <a href="/" class="continue-shopping">&larr; Continue Shopping</a>
+        </div>
+        <div class="cart-layout">
+            <div class="cart-main">
+                <section id="cart-items">
+                    <!-- cart.js populates this -->
+                </section>
+                <div class="empty-cart-cta">
+                    <a href="/" class="browse-menu-btn">Browse the Menu &rarr;</a>
+                </div>
+                <div id="cart-total">Total: $0.00</div>
+            </div>
+
+            <div class="cart-checkout">
+                <div class="order-summary">
+                    <h3>Order Summary</h3>
+                    <p class="summary-hint">Review your items, then continue to enter your delivery details and payment.</p>
+                    <button type="button" class="proceed-btn" onclick="proceedToCheckout()">Proceed to Checkout &rarr;</button>
+                </div>
+            </div>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 FoodieHub. All rights reserved.</p>
+    </footer>
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+    <script src="/js/auth-status.js"></script>
+    <script>
+        function proceedToCheckout() {
+            if (typeof cart === 'undefined' || cart.length === 0) {
+                alert('Your cart is empty.');
+                return;
+            }
+            window.location.href = '/checkout';
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub - Track Order</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li class="admin-only"><a href="/admin">Dashboard</a></li>
+                <li class="admin-only"><a href="/admin/menu">Manage Menu</a></li>
+                <li id="nav-login-item"><a href="/login">Login</a></li>
+                <li id="nav-register-item"><a href="/register">Register</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main>
+        <section id="tracking-container">
+            <h1>Order #<span id="order-id"><%= orderId %></span></h1>
+
+            <div id="status-stepper">
+                <div class="step active" data-step="0">Placed</div>
+                <div class="step" data-step="1">Preparing</div>
+                <div class="step" data-step="2">Out for Delivery</div>
+                <div class="step" data-step="3">Delivered</div>
+            </div>
+
+            <div id="current-status">
+                <p>Current Status: <strong id="status-text">Placed</strong></p>
+            </div>
+
+            <button onclick="window.location.href='/'" class="back-link">&larr; Back to Menu</button>
+        </section>
+    </main>
+    <footer>
+        <p>&copy; 2026 FoodieHub. All rights reserved.</p>
+    </footer>
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+    <script src="/js/auth-status.js"></script>
+</body>
+</html>

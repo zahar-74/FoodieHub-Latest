@@ -25,13 +25,13 @@ app.get('/', (req, res) => {
     res.render('index');
 });
 app.use('/menu', require('./routes/menu'));           // Track 1 ✅ (Omar)
-// app.use('/orders', require('./routes/orders'));       // Track 2
+app.use('/orders', require('./routes/orders'));       // Track 2 ✅ (Omar Hassan)
 app.use('/', require('./routes/auth'));               // Track 3 ✅ (Marwan)
 app.use('/', require('./routes/adminUsers'));         // Track 3 ✅ (Marwan)
-app.use('/admin', require('./routes/adminOrders'));
-app.use('/admin', require('./routes/adminReports')); // Track 4 ✅ (Mazen)
-app.use('/', require('./routes/reviews'));              // Track 5 ✅ (Yassin)
-app.use('/', require('./routes/orderHistory'));         // Track 5 ✅ (Yassin)
+app.use('/admin', require('./routes/adminOrders'));   // Track 4 ✅ (Mazen)
+app.use('/admin', require('./routes/adminReports'));  // Track 4 ✅ (Mazen)
+app.use('/', require('./routes/reviews'));            // Track 5 ✅ (Yassin)
+app.use('/', require('./routes/orderHistory'));       // Track 5 ✅ (Yassin)
 
 // ---- Centralized error handler (MUST BE LAST) ----
 app.use((err, req, res, next) => {
