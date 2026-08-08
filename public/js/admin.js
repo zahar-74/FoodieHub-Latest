@@ -1,5 +1,5 @@
 /* ============================================
-   MAZEN: ADMIN.JS - Admin Dashboard & Orders
+   ADMIN.JS - Admin Dashboard & Orders (Real API)
 ============================================ */
 
 let currentUser = { role: 'customer' };
@@ -24,63 +24,76 @@ window.toggleUserRole = function () {
     console.log('Current role:', currentUser.role);
 };
 
-function renderAdminTables() {
-    const mockOrders = [
-        { id: 'o1', customer: 'John Doe', items: 3, total: 24.97, status: 'Placed' },
-        { id: 'o2', customer: 'Jane Smith', items: 2, total: 16.98, status: 'Preparing' },
-        { id: 'o3', customer: 'Bob Wilson', items: 1, total: 9.99, status: 'Out for Delivery' },
-        { id: 'o4', customer: 'Alice Brown', items: 4, total: 35.96, status: 'Delivered' }
-    ];
-
-    const ordersTable = document.getElementById('admin-orders-table');
-    if (ordersTable) {
-        const tbody = ordersTable.querySelector('tbody');
-        if (tbody) {
-            let html = '';
-            mockOrders.forEach(order => {
-                html += `
-                    <tr>
-                        <td>#${order.id}</td>
-                        <td>${order.customer}</td>
-                        <td>${order.items}</td>
-                        <td>$${order.total.toFixed(2)}</td>
-                        <td><span class="status-badge status-${order.status.replace(/ /g, '-').toLowerCase()}">${order.status}</span></td>
-                        <td>
-                            <button class="action-btn update-status" onclick="updateOrderStatus('${order.id}')">Update</button>
-                        </td>
-                    </tr>
-                `;
-            });
-            tbody.innerHTML = html;
+// ===== ADMIN ORDERS =====
+async function renderAdminTables() {
+    try {
+        const response = await fetch('/admin/orders');
+        if (!response.ok) {
+            throw new Error('Failed to fetch orders');
         }
-    }
+        const orders = await response.json();
 
-    const totalOrders = document.getElementById('total-orders');
-    const totalRevenue = document.getElementById('total-revenue');
-    const pendingOrders = document.getElementById('pending-orders');
-    if (totalOrders) totalOrders.textContent = mockOrders.length;
-    if (totalRevenue) {
-        const revenue = mockOrders.reduce((sum, o) => sum + o.total, 0);
-        totalRevenue.textContent = `$${revenue.toFixed(2)}`;
-    }
-    if (pendingOrders) {
-        const pending = mockOrders.filter(o => o.status !== 'Delivered');
-        pendingOrders.textContent = pending.length;
+        const ordersTable = document.getElementById('admin-orders-table');
+        if (ordersTable) {
+            const tbody = ordersTable.querySelector('tbody');
+            if (tbody) {
+                let html = '';
+                orders.forEach(order => {
+                    html += `
+                        <tr>
+                            <td>#${order._id.slice(-6)}</td>
+                            <td>${order.customerId?.name || 'Unknown'}</td>
+                            <td>${order.items.length}</td>
+                            <td>$${order.total?.toFixed(2) || '0.00'}</td>
+                            <td><span class="status-badge status-${order.status?.replace(/ /g, '-').toLowerCase() || 'placed'}">${order.status || 'Placed'}</span></td>
+                            <td>
+                                <button class="action-btn update-status" onclick="updateOrderStatus('${order._id}')">Update</button>
+                            </td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = html;
+            }
+        }
+
+        // Update dashboard stats
+        const totalOrders = document.getElementById('total-orders');
+        const totalRevenue = document.getElementById('total-revenue');
+        const pendingOrders = document.getElementById('pending-orders');
+        if (totalOrders) totalOrders.textContent = orders.length;
+        if (totalRevenue) {
+            const revenue = orders.reduce((sum, o) => sum + (o.total || 0), 0);
+            totalRevenue.textContent = `$${revenue.toFixed(2)}`;
+        }
+        if (pendingOrders) {
+            const pending = orders.filter(o => o.status !== 'Delivered');
+            pendingOrders.textContent = pending.length;
+        }
+    } catch (err) {
+        console.error('Error loading orders:', err);
+        alert('Could not load orders. Please refresh.');
     }
 }
 
 async function updateOrderStatus(orderId) {
     try {
-        const response = await fetch(
-            `/admin/orders/${orderId}/status`,
-            {
-                method: 'PUT'
-            }
-        );
+        // Get current status from the table or ask user
+        const newStatus = prompt('Enter new status (Placed, Preparing, Out for Delivery, Delivered):');
+        if (!newStatus) return;
+        const validStatuses = ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'];
+        if (!validStatuses.includes(newStatus)) {
+            alert('Invalid status. Please use: ' + validStatuses.join(', '));
+            return;
+        }
 
-        const data = await response.json();
+        const response = await fetch(`/admin/orders/${orderId}/status`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: newStatus })
+        });
 
         if (!response.ok) {
+            const data = await response.json();
             alert(data.error || 'Could not update order status');
             return;
         }
@@ -92,110 +105,182 @@ async function updateOrderStatus(orderId) {
     }
 }
 
-function renderMenuTable() {
+// ===== ADMIN MENU MANAGEMENT =====
+async function renderMenuTable() {
     const menuTable = document.getElementById('admin-menu-table');
     if (!menuTable) return;
 
-    const items = window.menuItems || menuItems || [];
-    const tbody = menuTable.querySelector('tbody');
-    if (!tbody) return;
-
-    if (items.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5">No menu items found.</td></tr>';
-        return;
-    }
-
-    let html = '';
-    items.forEach(item => {
-        html += `
-            <tr>
-                <td>${item.name}</td>
-                <td>${item.category}</td>
-                <td>$${item.price.toFixed(2)}</td>
-                <td>${item.available ? '✅ Available' : '❌ Unavailable'}</td>
-                <td>
-                    <button class="action-btn edit" onclick="editMenuItem('${item.id}')">Edit</button>
-                    <button class="action-btn delete" onclick="deleteMenuItem('${item.id}')">Delete</button>
-                </td>
-            </tr>
-        `;
-    });
-    tbody.innerHTML = html;
-}
-
-function editMenuItem(itemId) {
-    const items = window.menuItems || menuItems || [];
-    const item = items.find(i => i.id === itemId);
-    if (!item) return;
-    const newName = prompt('Edit item name:', item.name);
-    if (newName) {
-        item.name = newName;
-        const newPrice = prompt('Edit item price:', item.price);
-        if (newPrice) {
-            item.price = parseFloat(newPrice);
-            renderMenuTable();
-            if (typeof renderMenu === 'function') renderMenu(items);
-            alert('Item updated!');
+    try {
+        const response = await fetch('/menu');
+        if (!response.ok) {
+            throw new Error('Failed to fetch menu');
         }
-    }
-}
+        const items = await response.json();
 
-function deleteMenuItem(itemId) {
-    if (confirm('Are you sure you want to delete this item?')) {
-        const items = window.menuItems || menuItems || [];
-        const index = items.findIndex(i => i.id === itemId);
-        if (index !== -1) {
-            items.splice(index, 1);
-            window.menuItems = items;
-            renderMenuTable();
-            if (typeof renderMenu === 'function') renderMenu(items);
-            alert('Item deleted!');
+        const tbody = menuTable.querySelector('tbody');
+        if (!tbody) return;
+
+        if (items.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6">No menu items found.</td></tr>';
+            return;
         }
+
+        let html = '';
+        items.forEach(item => {
+            html += `
+                <tr>
+                    <td>${item.name}</td>
+                    <td>${item.category || 'Uncategorized'}</td>
+                    <td>$${item.price?.toFixed(2) || '0.00'}</td>
+                    <td>${item.available ? '✅ Available' : '❌ Unavailable'}</td>
+                    <td>
+                        <button class="action-btn edit" onclick="editMenuItem('${item._id}')">Edit</button>
+                        <button class="action-btn delete" onclick="deleteMenuItem('${item._id}')">Delete</button>
+                    </td>
+                </tr>
+            `;
+        });
+        tbody.innerHTML = html;
+    } catch (err) {
+        console.error('Error loading menu:', err);
+        alert('Could not load menu. Please refresh.');
     }
 }
 
-function startTracking() {
+async function editMenuItem(itemId) {
+    try {
+        // Fetch current item data
+        const response = await fetch(`/menu/${itemId}`);
+        if (!response.ok) {
+            alert('Item not found');
+            return;
+        }
+        const item = await response.json();
+
+        // Prompt for new values
+        const newName = prompt('Edit item name:', item.name) || item.name;
+        const newDesc = prompt('Edit item description:', item.description) || item.description;
+        const newPrice = parseFloat(prompt('Edit item price:', item.price)) || item.price;
+        const newCategory = prompt('Edit item category:', item.category) || item.category;
+        const newAvailable = confirm('Is this item available? Click OK for Yes, Cancel for No.');
+
+        const updatedItem = {
+            name: newName,
+            description: newDesc,
+            price: newPrice,
+            category: newCategory,
+            available: newAvailable,
+            dietaryTags: item.dietaryTags || [],
+            imageUrl: item.imageUrl || ''
+        };
+
+        const updateResponse = await fetch(`/admin/menu-items/${itemId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updatedItem)
+        });
+
+        if (!updateResponse.ok) {
+            const data = await updateResponse.json();
+            alert(data.error || 'Update failed');
+            return;
+        }
+
+        alert('Item updated successfully!');
+        renderMenuTable();
+        // Also update the main menu if fetch.js is used
+        if (typeof loadMenuItems === 'function') loadMenuItems();
+    } catch (err) {
+        console.error(err);
+        alert('Could not edit item');
+    }
+}
+
+async function deleteMenuItem(itemId) {
+    if (!confirm('Are you sure you want to delete this item?')) return;
+    try {
+        const response = await fetch(`/admin/menu-items/${itemId}`, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            alert(data.error || 'Delete failed');
+            return;
+        }
+
+        alert('Item deleted successfully!');
+        renderMenuTable();
+        if (typeof loadMenuItems === 'function') loadMenuItems();
+    } catch (err) {
+        console.error(err);
+        alert('Could not delete item');
+    }
+}
+
+// ===== ORDER TRACKING POLLING (REAL) =====
+let trackingInterval = null;
+
+function startTracking(orderId) {
     const statusText = document.getElementById('status-text');
     const steps = document.querySelectorAll('.step');
     if (!statusText) return;
 
-    const statuses = ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'];
-    let index = 0;
-    statusText.textContent = statuses[0];
-
-    function updateStepper(idx) {
-        steps.forEach((step, i) => {
-            if (i <= idx) {
-                step.classList.add('active');
-                step.classList.remove('inactive');
-            } else {
-                step.classList.remove('active');
-                step.classList.add('inactive');
+    // Function to fetch current status
+    async function fetchStatus() {
+        try {
+            const response = await fetch(`/orders/${orderId}/status`);
+            if (!response.ok) {
+                throw new Error('Failed to fetch status');
             }
-        });
-    }
+            const data = await response.json();
+            const currentStatus = data.status || 'Placed';
 
-    function nextStatus() {
-        index++;
-        if (index < statuses.length) {
-            statusText.textContent = statuses[index];
-            updateStepper(index);
-            const nextDelay = Math.floor(Math.random() * (8000 - 3000 + 1)) + 3000;
-            setTimeout(nextStatus, nextDelay);
-        } else {
-            statusText.textContent = '✅ Order Delivered!';
+            // Update text and stepper
+            statusText.textContent = currentStatus;
+            const statuses = ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'];
+            const idx = statuses.indexOf(currentStatus);
+            if (idx !== -1) {
+                steps.forEach((step, i) => {
+                    if (i <= idx) {
+                        step.classList.add('active');
+                        step.classList.remove('inactive');
+                    } else {
+                        step.classList.remove('active');
+                        step.classList.add('inactive');
+                    }
+                });
+            }
+
+            // Stop polling when delivered
+            if (currentStatus === 'Delivered') {
+                clearInterval(trackingInterval);
+                trackingInterval = null;
+            }
+        } catch (err) {
+            console.error('Error fetching status:', err);
         }
     }
 
-    const firstDelay = Math.floor(Math.random() * (5000 - 2000 + 1)) + 2000;
-    setTimeout(nextStatus, firstDelay);
+    // Poll every 3 seconds
+    fetchStatus(); // initial fetch
+    trackingInterval = setInterval(fetchStatus, 3000);
 }
 
+// ===== DOM INIT =====
 document.addEventListener('DOMContentLoaded', function () {
     toggleAdminLinks();
     renderMenuTable();
 
-    if (document.getElementById('status-text')) {
-        startTracking();
+    // If on tracking page, start polling
+    const statusText = document.getElementById('status-text');
+    if (statusText) {
+        // Get orderId from URL or hidden input
+        const orderId = window.location.pathname.split('/').pop(); // e.g., /track/123 -> 123
+        if (orderId && orderId !== 'track') {
+            startTracking(orderId);
+        } else {
+            statusText.textContent = 'No order ID found';
+        }
     }
 });

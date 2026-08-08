@@ -85,85 +85,74 @@ function updateCartUI() {
     renderCartItems();
 }
 
-function renderOrderHistory() {
+async function renderOrderHistory() {
     const container = document.getElementById('order-history-list');
     if (!container) return;
 
-    const mockOrders = [
-        {
-            id: 'o1',
-            items: [
-                { menuItemId: 'm1', name: 'Margherita Pizza', price: 12.99, quantity: 2 },
-                { menuItemId: 'm3', name: 'Classic Burger', price: 9.99, quantity: 1 }
-            ],
-            status: 'Delivered',
-            placedAt: '2026-07-25T12:00:00',
-            total: 35.97
-        },
-        {
-            id: 'o2',
-            items: [
-                { menuItemId: 'm2', name: 'Caesar Salad', price: 8.99, quantity: 1 }
-            ],
-            status: 'Delivered',
-            placedAt: '2026-07-24T18:30:00',
-            total: 8.99
-        }
-    ];
+    // Replace mock data with real API call
+    // For demo, you might pass a customerId from session or use a default
+    const customerId = sessionStorage.getItem('customerId') || '...'; // implement this
+    const orders = await loadOrderHistory(customerId);
 
-    if (mockOrders.length === 0) {
+    if (!orders || orders.length === 0) {
         container.innerHTML = '<p>You have no past orders.</p>';
         return;
     }
 
     let html = '';
-    mockOrders.forEach(order => {
+    orders.forEach(order => {
         html += `
             <div class="order-item">
-                <h4>Order #${order.id}</h4>
-                <p>Date: ${new Date(order.placedAt).toLocaleString()}</p>
+                <h4>Order #${order._id.slice(-6)}</h4>
+                <p>Date: ${new Date(order.createdAt).toLocaleString()}</p>
                 <p>Status: ${order.status}</p>
-                <p>Total: $${order.total.toFixed(2)}</p>
-                <button onclick="reorder('${order.id}')">Reorder</button>
+                <p>Total: $${order.total?.toFixed(2) || '0.00'}</p>
+                <button onclick="reorder('${order._id}')">Reorder</button>
             </div>
         `;
     });
     container.innerHTML = html;
 }
-
-function reorder(orderId) {
-    const mockOrders = [
-        {
-            id: 'o1',
-            items: [
-                { menuItemId: 'm1', name: 'Margherita Pizza', price: 12.99, quantity: 2 },
-                { menuItemId: 'm3', name: 'Classic Burger', price: 9.99, quantity: 1 }
-            ]
-        },
-        {
-            id: 'o2',
-            items: [
-                { menuItemId: 'm2', name: 'Caesar Salad', price: 8.99, quantity: 1 }
-            ]
+async function loadOrderHistory(customerId) {
+    try {
+        const response = await fetch(`/orders?customerId=${customerId}`);
+        if (!response.ok) {
+            throw new Error('Failed to fetch order history');
         }
-    ];
-
-    const order = mockOrders.find(o => o.id === orderId);
-    if (!order) {
-        console.error('Order not found:', orderId);
-        return;
+        const orders = await response.json();
+        return orders;
+    } catch (err) {
+        console.error('Error loading order history:', err);
+        return [];
     }
-
-    const items = window.menuItems || menuItems || [];
-    order.items.forEach(item => {
-        const menuItem = items.find(i => i.id === item.menuItemId);
-        if (menuItem) {
-            addToCart(menuItem, item.quantity);
+}
+async function reorder(orderId) {
+    try {
+        // Fetch the order details
+        const response = await fetch(`/orders/${orderId}`);
+        if (!response.ok) {
+            alert('Order not found');
+            return;
         }
-    });
+        const order = await response.json();
 
-    alert('Items added to cart!');
-    window.location.href = 'cart.html';
+        // Add each item to cart
+        order.items.forEach(item => {
+            // Find the menu item by ID from global store
+            const menuItem = window.menuItems?.find(i => i._id === item.menuItem?._id);
+            if (menuItem) {
+                addToCart(menuItem, item.quantity, item.customizations || '');
+            } else {
+                console.warn('Menu item not found:', item.menuItem);
+            }
+        });
+
+        alert('Items added to cart!');
+        window.location.href = 'cart.html';
+    } catch (err) {
+        console.error(err);
+        alert('Could not reorder');
+    }
 }
 
 document.addEventListener('DOMContentLoaded', function () {

@@ -34,8 +34,8 @@ function renderMenu(items) {
     items.forEach(item => {
         html += `
             <div class="item-card" data-id="${item.id}">
-                <img src="${item.imageUrl || 'https://via.placeholder.com/300x200?text=Food'}" 
-                     alt="${item.name}" 
+                <img src="${item.imageUrl || 'https://via.placeholder.com/300x200?text=Food'}"
+                     alt="${item.name}"
                      class="item-image"
                      onclick="goToItem('${item.id}')"
                      onerror="this.src='https://via.placeholder.com/300x200?text=Food'">
@@ -57,11 +57,12 @@ function renderMenu(items) {
 
 /**
  * Navigate to item detail page
+ * UPDATED: Now uses /item (EJS route) instead of item.html
  */
 function goToItem(itemId) {
     if (itemId) {
         sessionStorage.setItem('selectedItemId', itemId);
-        window.location.href = 'item.html';
+        window.location.href = '/item';   // ✅ Updated
     }
 }
 
@@ -156,7 +157,7 @@ function renderItemDetail() {
                 addToCart(item, quantity, customizations);
             }
             alert(`${item.name} added to cart!`);
-            window.location.href = 'cart.html';
+            window.location.href = '/cart';   // ✅ Updated
         };
     }
 
@@ -247,4 +248,4 @@ window.addEventListener('storage', function (e) {
         console.log('Storage event: selectedItemId changed');
         renderItemDetail();
     }
-});
+}); 

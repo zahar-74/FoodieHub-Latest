@@ -33,6 +33,11 @@ app.use('/admin', require('./routes/adminReports'));  // Track 4 ✅ (Mazen)
 app.use('/', require('./routes/reviews'));            // Track 5 ✅ (Yassin)
 app.use('/', require('./routes/orderHistory'));       // Track 5 ✅ (Yassin)
 
+// ---- Views that are rendered as pages (client-side data fetching) ----
+app.get('/item', (req, res) => res.render('item'));
+app.get('/cart', (req, res) => res.render('cart'));
+app.get('/admin-menu-manage', (req, res) => res.render('admin-menu-manage'));
+
 // ---- Centralized error handler (MUST BE LAST) ----
 app.use((err, req, res, next) => {
     console.error(err.stack);
