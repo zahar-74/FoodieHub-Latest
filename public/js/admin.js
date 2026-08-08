@@ -69,12 +69,26 @@ function renderAdminTables() {
     }
 }
 
-function updateOrderStatus(orderId) {
-    const statuses = ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'];
-    const currentStatus = prompt(`Enter new status for order #${orderId}:\n${statuses.join(', ')}`);
-    if (currentStatus && statuses.includes(currentStatus)) {
-        alert(`Order #${orderId} updated to "${currentStatus}" (Demo mode)`);
-        renderAdminTables();
+async function updateOrderStatus(orderId) {
+    try {
+        const response = await fetch(
+            `/admin/orders/${orderId}/status`,
+            {
+                method: 'PUT'
+            }
+        );
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            alert(data.error || 'Could not update order status');
+            return;
+        }
+
+        window.location.reload();
+    } catch (err) {
+        console.error(err);
+        alert('Could not update order status');
     }
 }
 
@@ -179,7 +193,6 @@ function startTracking() {
 
 document.addEventListener('DOMContentLoaded', function () {
     toggleAdminLinks();
-    renderAdminTables();
     renderMenuTable();
 
     if (document.getElementById('status-text')) {

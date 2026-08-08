@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub — Manage Orders</title>
+    <link rel="stylesheet" href="/public/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub Admin</div>
+            <ul class="nav-links">
+                <li><a href="/admin/dashboard">Dashboard</a></li>
+                <li><a href="/admin/orders">Manage Orders</a></li>
+                <li><a href="admin-menu-manage.html">Manage Menu</a></li>
+                <li><a href="index.html">View Site</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <h1>All Orders</h1>
+        <table id="admin-orders-table">
+            <thead>
+                <tr>
+                    <th>Order ID</th>
+                    <th>Customer</th>
+                    <th>Items</th>
+                    <th>Total</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+    <% if (orders.length === 0) { %>
+        <tr>
+            <td colspan="6">No orders found.</td>
+        </tr>
+    <% } else { %>
+        <% orders.forEach(order => { %>
+            <tr>
+                <td><%= order._id %></td>
+
+                <td>
+                    <%= order.customerId
+                        ? order.customerId.name
+                        : 'Unknown customer' %>
+                </td>
+
+                <td>
+                    <%= order.items.reduce(
+                        (sum, item) => sum + (item.quantity || 0),
+                        0
+                    ) %>
+                </td>
+
+                <td>$<%= (order.total || 0).toFixed(2) %></td>
+
+                <td><%= order.status %></td>
+
+                <td>
+                    <% if (order.status === 'Delivered') { %>
+                        <button class="action-btn" disabled>
+                            Delivered
+                        </button>
+                    <% } else { %>
+                        <button
+                            class="action-btn update-status"
+                            onclick="updateOrderStatus('<%= order._id %>')">
+                            Update Status
+                        </button>
+                    <% } %>
+                </td>
+            </tr>
+        <% }) %>
+    <% } %>
+</tbody>
+        </table>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 FoodieHub Admin</p>
+    </footer>
+
+    <script src="/public/js/menu.js"></script>
+    <script src="/public/js/cart.js"></script>
+    <script src="/public/js/validation.js"></script>
+    <script src="/public/js/admin.js"></script>
+    <script src="/public/js/fetch.js"></script>
+</body>
+
+</html>
