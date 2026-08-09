@@ -74,3 +74,19 @@ exports.deleteMenuItem = async (req, res, next) => {
         next(err);
     }
 };
+
+// GET /menu/:id
+exports.getMenuItemById = async (req, res, next) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Menu item not found' });
+        }
+        const item = await MenuItem.findById(req.params.id);
+        if (!item) {
+            return res.status(404).json({ error: 'Menu item not found' });
+        }
+        res.json(item);
+    } catch (err) {
+        next(err);
+    }
+};

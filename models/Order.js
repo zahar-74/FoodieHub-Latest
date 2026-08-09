@@ -9,22 +9,20 @@ const orderSchema = new mongoose.Schema({
     items: [
         {
             menuItem: { type: mongoose.Schema.Types.ObjectId, ref: 'MenuItem' },
-            quantity: Number,
-            customizations: String
+            name: { type: String, required: true },
+            price: { type: Number, required: true },
+            quantity: { type: Number, required: true },
+            customizations: { type: String, default: '' }
         }
     ],
-    total: Number,
+    total: { type: Number, required: true },
     status: {
-    type: String,
-    enum: [
-        'Placed',
-        'Preparing',
-        'Out for Delivery',
-        'Delivered'
-    ],
-    default: 'Placed'
-},
-
+        type: String,
+        enum: ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'],
+        default: 'Placed'
+    },
+    scheduledFor: { type: Date, default: null },
+    deliveryAddress: { type: String, required: true }, // ✅ added
     createdAt: {
         type: Date,
         default: Date.now

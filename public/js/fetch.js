@@ -26,15 +26,22 @@ async function loadMenuItems() {
             console.warn('setMenuItems function not found');
         }
 
-        // Render admin tables if on admin page
-        if (typeof renderAdminTables === 'function') {
-            renderAdminTables();
+        // ✅ Render admin menu table ONLY if the admin-menu-table exists
+        if (document.getElementById('admin-menu-table')) {
+            if (typeof renderMenuTable === 'function') {
+                renderMenuTable();  // ✅ Fixed: now calls renderMenuTable (not renderAdminTables)
+            } else {
+                console.warn('renderMenuTable function not found');
+            }
         }
 
         return data;
     } catch (error) {
         console.error('Error loading menu from API:', error);
-        alert('Could not load menu. Please refresh the page or try again later.');
+        // Only show alert if we're on a page that needs menu (not admin pages)
+        if (document.getElementById('menu-grid')) {
+            alert('Could not load menu. Please refresh the page or try again later.');
+        }
         return [];
     }
 }
@@ -47,12 +54,13 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     if (document.getElementById('admin-menu-table')) {
-        if (typeof window.menuItems !== 'undefined' && window.menuItems.length === 0) {
-            loadMenuItems();
-        } else {
-            if (typeof renderAdminTables === 'function') {
-                setTimeout(renderAdminTables, 100);
+        // If we already have menu items, render the table; otherwise load them first
+        if (window.menuItems && window.menuItems.length > 0) {
+            if (typeof renderMenuTable === 'function') {
+                renderMenuTable();
             }
+        } else {
+            loadMenuItems();
         }
     }
 

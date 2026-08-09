@@ -1,13 +1,16 @@
 // reviews.js — handles the review list + form on the item detail page (Track 5)
 
 (function () {
-    const params = new URLSearchParams(window.location.search);
-    const itemId = params.get('id');
+    // Read itemId from sessionStorage (set by menu.js goToItem)
+    const itemId = sessionStorage.getItem('selectedItemId');
 
     const reviewsListEl = document.getElementById('reviews-list');
     const reviewFormEl = document.getElementById('review-form');
 
-    if (!itemId) return;
+    if (!itemId) {
+        if (reviewsListEl) reviewsListEl.innerHTML = '<p>No item selected.</p>';
+        return;
+    }
 
     function loadReviews() {
         fetch(`/menu/${itemId}/reviews`)

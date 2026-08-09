@@ -5,7 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FoodieHub — Menu</title>
-    <link rel="stylesheet" href="/public/css/styles.css">
+    <link rel="stylesheet" href="/css/styles.css">
+    <script src="/js/fetch.js"></script>
 </head>
 
 <body>
@@ -13,11 +14,13 @@
         <nav>
             <div class="logo">FoodieHub</div>
             <ul class="nav-links">
-                <li><a href="index.html">Menu</a></li>
-                <li><a href="cart.html">Cart <span id="cart-badge">0</span></a></li>
-                <li><a href="order-history.html">My Orders</a></li>
-                <li><a href="login.html">Login</a></li>
-                <li><a href="admin-dashboard.html">Admin</a></li>
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li id="nav-login-item"><a href="/login">Login</a></li>
+                <li id="nav-register-item"><a href="/register">Register</a></li>
+                <li id="nav-logout-item" style="display:none;"><a href="/logout">Logout</a></li>
+                <li><a href="/admin/dashboard">Admin</a></li>
             </ul>
         </nav>
     </header>
@@ -67,11 +70,12 @@
         <p>&copy; 2026 FoodieHub. Built with Hunger and Passion.</p>
     </footer>
 
-    <script src="/public/js/menu.js"></script>
-    <script src="/public/js/cart.js"></script>
-    <script src="/public/js/validation.js"></script>
-    <script src="/public/js/admin.js"></script>
-    <script src="/public/js/fetch.js"></script>
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+    <script src="/js/auth-status.js"></script>
 </body>
 
 </html>

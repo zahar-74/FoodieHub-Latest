@@ -5,7 +5,8 @@ const MenuItem = require('../models/MenuItem');
 // POST /orders
 exports.createOrder = async (req, res, next) => {
     try {
-        const { items, scheduledFor } = req.body;
+        // ✅ Only one destructuring, includes deliveryAddress
+        const { items, scheduledFor, deliveryAddress } = req.body;
         const customerId = req.user.id;
 
         if (!Array.isArray(items) || items.length === 0) {
@@ -52,7 +53,8 @@ exports.createOrder = async (req, res, next) => {
             items: orderItems,
             total: Math.round(total * 100) / 100,
             status: 'Placed',
-            scheduledFor: scheduledDate
+            scheduledFor: scheduledDate,
+            deliveryAddress: deliveryAddress
         });
 
         res.status(201).json(order);
@@ -61,7 +63,7 @@ exports.createOrder = async (req, res, next) => {
     }
 };
 
-// GET /orders/:id
+// GET /orders/:id (with ownership check)
 exports.getOrderById = async (req, res, next) => {
     try {
         if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -73,13 +75,20 @@ exports.getOrderById = async (req, res, next) => {
             return res.status(404).json({ error: 'Order not found' });
         }
 
+        if (!req.user) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        if (req.user.role !== 'admin' && order.customerId.toString() !== req.user.id) {
+            return res.status(403).json({ error: 'You do not have access to this order' });
+        }
+
         res.json(order);
     } catch (err) {
         next(err);
     }
 };
 
-// GET /orders/:id/status
+// GET /orders/:id/status (public – no auth needed for tracking)
 exports.getOrderStatus = async (req, res, next) => {
     try {
         if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -97,7 +106,7 @@ exports.getOrderStatus = async (req, res, next) => {
     }
 };
 
-// GET /orders/:id/track (renders the tracking page)
+// GET /orders/:id/track (public – renders tracking page)
 exports.renderOrderTrackingPage = async (req, res, next) => {
     try {
         if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -115,7 +124,7 @@ exports.renderOrderTrackingPage = async (req, res, next) => {
     }
 };
 
-// GET /admin/api/orders (admin only)
+// GET /admin/api/orders (admin only – unused, kept for reference)
 exports.getAllOrders = async (req, res, next) => {
     try {
         const orders = await Order.find({})
@@ -129,7 +138,7 @@ exports.getAllOrders = async (req, res, next) => {
     }
 };
 
-// PATCH /admin/api/orders/:id/status (admin only)
+// PATCH /admin/api/orders/:id/status (admin only – unused, kept for reference)
 exports.updateOrderStatus = async (req, res, next) => {
     try {
         const { status } = req.body;

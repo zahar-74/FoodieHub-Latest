@@ -1,0 +1,6127 @@
+--- adminOrderController.js ---
+const mongoose = require('mongoose');
+const Order = require('../models/Order');
+
+const orderStatuses = [
+    'Placed',
+    'Preparing',
+    'Out for Delivery',
+    'Delivered'
+];
+
+async function getOrders(req, res) {
+    try {
+        const { status } = req.query;
+
+        const filter = {};
+
+        if (status) {
+            if (!orderStatuses.includes(status)) {
+                return res.status(400).json({
+                    error: 'Invalid order status'
+                });
+            }
+
+            filter.status = status;
+        }
+
+        const orders = await Order.find(filter)
+            .populate('customerId', 'name email')
+            .populate('items.menuItem', 'name price')
+            .sort({ createdAt: -1 });
+
+        return res.status(200).render('admin-orders', {
+            orders
+        });
+    } catch (err) {
+        console.error(err);
+
+        return res.status(500).json({
+            error: 'Server error'
+        });
+    }
+}
+
+async function updateOrderStatus(req, res) {
+    try {
+        const { id } = req.params;
+        const { status } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({
+                error: 'Invalid order ID'
+            });
+        }
+
+        if (!orderStatuses.includes(status)) {
+            return res.status(400).json({
+                error: 'Invalid order status'
+            });
+        }
+
+        const order = await Order.findById(id);
+
+        if (!order) {
+            return res.status(404).json({
+                error: 'Order not found'
+            });
+        }
+
+        if (order.status === 'Delivered') {
+            return res.status(400).json({
+                error: 'Delivered orders cannot be updated'
+            });
+        }
+
+        // Éo. Now honors the status the admin actually selected
+        order.status = status;
+        await order.save();
+
+        return res.status(200).json({
+            message: 'Order status updated successfully',
+            order
+        });
+    } catch (err) {
+        console.error(err);
+
+        return res.status(500).json({
+            error: 'Server error'
+        });
+    }
+}
+
+module.exports = {
+    getOrders,
+    updateOrderStatus
+};
+--- authController.js ---
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+const emailPattern = /^[^\s@]+@[^\s@]+\.[a-z]{2,3}$/;
+
+function createToken(user) {
+    return jwt.sign(
+        {
+            id: user._id,
+            role: user.role
+        },
+        process.env.JWT_SECRET,
+        {
+            expiresIn: '1h'
+        }
+    );
+}
+
+async function register(req, res) {
+    try {
+        const { name, email, password } = req.body;
+
+        if (
+            !name ||
+            name.trim() === '' ||
+            !email ||
+            !emailPattern.test(email) ||
+            !password ||
+            password.length < 6
+        ) {
+            return res.status(400).render('register', {
+                error: 'Please provide a valid name, email, and password (min 6 chars)'
+            });
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+
+        const existingUser = await User.findOne({
+            email: normalizedEmail
+        });
+
+        if (existingUser) {
+            return res.status(400).render('register', {
+                error: 'Email is already registered'
+            });
+        }
+
+        const saltRounds = 8;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+        await User.create({
+            name: name.trim(),
+            email: normalizedEmail,
+            password: hashedPassword,
+            role: 'customer',
+            active: true
+        });
+
+        // Éo. Redirect to login page on success
+        return res.redirect('/login');
+    } catch (err) {
+        console.error(err);
+        return res.status(500).render('register', {
+            error: 'Server error. Please try again later.'
+        });
+    }
+}
+
+async function login(req, res) {
+    try {
+        const { email, password } = req.body;
+
+        if (
+            !email ||
+            !emailPattern.test(email) ||
+            !password ||
+            password.length < 6
+        ) {
+            return res.status(400).render('login', {
+                error: 'Please provide a valid email and password'
+            });
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+
+        const user = await User.findOne({
+            email: normalizedEmail
+        }).select('+password');
+
+        if (!user) {
+            return res.status(401).render('login', {
+                error: 'Invalid email or password'
+            });
+        }
+
+        if (!user.active) {
+            return res.status(403).render('login', {
+                error: 'This account has been disabled'
+            });
+        }
+
+        const isMatch = await bcrypt.compare(password, user.password);
+
+        if (!isMatch) {
+            return res.status(401).render('login', {
+                error: 'Invalid email or password'
+            });
+        }
+
+        const token = createToken(user);
+
+        res.cookie('token', token, {
+            httpOnly: true,
+            sameSite: 'strict',
+            secure: process.env.NODE_ENV === 'production',
+            maxAge: 60 * 60 * 1000
+        });
+
+        // Redirect based on role
+        if (user.role === 'admin') {
+            return res.redirect('/admin/dashboard');
+        } else {
+            return res.redirect('/');
+        }
+    } catch (err) {
+        console.error(err);
+        return res.status(500).render('login', {
+            error: 'Server error. Please try again later.'
+        });
+    }
+}
+
+module.exports = {
+    register,
+    login
+};
+--- menuController.js ---
+const MenuItem = require('../models/MenuItem');
+
+// GET /menu?category=Pizza&maxPrice=15&diet=vegetarian
+exports.getAllMenuItems = async (req, res, next) => {
+    try {
+        const filter = { available: true };
+
+        if (req.query.category && req.query.category !== 'all') {
+            filter.category = req.query.category;
+        }
+        if (req.query.maxPrice) {
+            filter.price = { $lte: parseFloat(req.query.maxPrice) };
+        }
+        if (req.query.diet && req.query.diet !== 'all') {
+            filter.dietaryTags = req.query.diet;
+        }
+
+        const items = await MenuItem.find(filter);
+        res.json(items);
+    } catch (err) {
+        next(err);
+    }
+};
+
+// GET /menu/:id
+exports.getMenuItemById = async (req, res, next) => {
+    try {
+        const item = await MenuItem.findById(req.params.id);
+        if (!item) {
+            return res.status(404).json({ error: 'Menu item not found' });
+        }
+        res.json(item);
+    } catch (err) {
+        next(err);
+    }
+};
+
+// POST /admin/menu-items
+exports.createMenuItem = async (req, res, next) => {
+    try {
+        const { name, description, price, category } = req.body;
+        if (!name || !description || !price || !category) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+        const newItem = await MenuItem.create(req.body);
+        res.status(201).json(newItem);
+    } catch (err) {
+        next(err);
+    }
+};
+
+// PUT /admin/menu-items/:id
+exports.updateMenuItem = async (req, res, next) => {
+    try {
+        const updated = await MenuItem.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        if (!updated) {
+            return res.status(404).json({ error: 'Menu item not found' });
+        }
+        res.status(200).json(updated);
+    } catch (err) {
+        next(err);
+    }
+};
+
+// DELETE /admin/menu-items/:id
+exports.deleteMenuItem = async (req, res, next) => {
+    try {
+        const deleted = await MenuItem.findByIdAndDelete(req.params.id);
+        if (!deleted) {
+            return res.status(404).json({ error: 'Menu item not found' });
+        }
+        res.sendStatus(204);
+    } catch (err) {
+        next(err);
+    }
+};
+--- orderController.js ---
+const mongoose = require('mongoose');
+const Order = require('../models/Order');
+const MenuItem = require('../models/MenuItem');
+
+// POST /orders
+exports.createOrder = async (req, res, next) => {
+    try {
+        const { items, scheduledFor } = req.body;
+        const customerId = req.user.id;
+
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ error: 'Order must include at least one item' });
+        }
+
+        let scheduledDate = null;
+        if (scheduledFor) {
+            scheduledDate = new Date(scheduledFor);
+            if (isNaN(scheduledDate.getTime()) || scheduledDate <= new Date()) {
+                return res.status(400).json({ error: 'scheduledFor must be a valid future date' });
+            }
+        }
+
+        const orderItems = [];
+        let total = 0;
+
+        for (const { menuItemId, quantity, customizations } of items) {
+            if (!menuItemId || !mongoose.Types.ObjectId.isValid(menuItemId)) {
+                return res.status(400).json({ error: 'Each item requires a valid menuItemId' });
+            }
+            if (!Number.isInteger(quantity) || quantity < 1) {
+                return res.status(400).json({ error: 'Each item requires a quantity of at least 1' });
+            }
+
+            const menuItem = await MenuItem.findById(menuItemId);
+            if (!menuItem || !menuItem.available) {
+                return res.status(400).json({ error: `Menu item ${menuItemId} is not available` });
+            }
+
+            total += menuItem.price * quantity;
+
+            orderItems.push({
+                menuItem: menuItem._id,
+                name: menuItem.name,
+                price: menuItem.price,
+                quantity,
+                customizations: customizations || ''
+            });
+        }
+
+        const order = await Order.create({
+            customerId,
+            items: orderItems,
+            total: Math.round(total * 100) / 100,
+            status: 'Placed',
+            scheduledFor: scheduledDate
+        });
+
+        res.status(201).json(order);
+    } catch (err) {
+        next(err);
+    }
+};
+
+// GET /orders/:id (with ownership check)
+exports.getOrderById = async (req, res, next) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+
+        const order = await Order.findById(req.params.id).populate('items.menuItem');
+        if (!order) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+
+        // Éo. Ownership check: must be logged in and either admin or customer who owns the order
+        if (!req.user) {
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+        if (req.user.role !== 'admin' && order.customerId.toString() !== req.user.id) {
+            return res.status(403).json({ error: 'You do not have access to this order' });
+        }
+
+        res.json(order);
+    } catch (err) {
+        next(err);
+    }
+};
+
+// GET /orders/:id/status (public É?" no auth needed for tracking)
+exports.getOrderStatus = async (req, res, next) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+
+        const order = await Order.findById(req.params.id).select('status');
+        if (!order) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+
+        res.json({ id: order._id, status: order.status });
+    } catch (err) {
+        next(err);
+    }
+};
+
+// GET /orders/:id/track (public É?" renders tracking page)
+exports.renderOrderTrackingPage = async (req, res, next) => {
+    try {
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).send('Order not found');
+        }
+
+        const order = await Order.findById(req.params.id);
+        if (!order) {
+            return res.status(404).send('Order not found');
+        }
+
+        res.render('order-tracking', { orderId: order._id.toString() });
+    } catch (err) {
+        next(err);
+    }
+};
+
+// GET /admin/api/orders (admin only É?" unused, kept for reference)
+exports.getAllOrders = async (req, res, next) => {
+    try {
+        const orders = await Order.find({})
+            .populate('items.menuItem')
+            .populate('customerId', 'name email')
+            .sort({ createdAt: -1 });
+
+        res.json(orders);
+    } catch (err) {
+        next(err);
+    }
+};
+
+// PATCH /admin/api/orders/:id/status (admin only É?" unused, kept for reference)
+exports.updateOrderStatus = async (req, res, next) => {
+    try {
+        const { status } = req.body;
+        const validStatuses = ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'];
+
+        if (!validStatuses.includes(status)) {
+            return res.status(400).json({ error: `status must be one of: ${validStatuses.join(', ')}` });
+        }
+
+        if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+
+        const order = await Order.findByIdAndUpdate(req.params.id, { status }, { new: true });
+        if (!order) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+
+        res.json(order);
+    } catch (err) {
+        next(err);
+    }
+};
+--- orderHistoryController.js ---
+const Order = require('../models/Order');
+
+// GET /orders (JSON É?" uses authenticated user)
+exports.getOrdersJson = async (req, res) => {
+    try {
+        // Use the logged-in user's ID from the JWT
+        const customerId = req.user.id;
+        const orders = await Order.find({ customerId })
+            .populate('items.menuItem')
+            .sort({ createdAt: -1 });
+        res.json(orders);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Could not fetch order history' });
+    }
+};
+
+// GET /order-history (renders the page) É?" pass customerId from req.user
+exports.renderOrderHistoryPage = async (req, res) => {
+    try {
+        const customerId = req.user ? req.user.id : null;
+        let orders = [];
+        if (customerId) {
+            orders = await Order.find({ customerId })
+                .populate('items.menuItem')
+                .sort({ createdAt: -1 });
+        }
+        res.render('order-history', { orders });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Could not load order history');
+    }
+};
+--- reportController.js ---
+const Order = require('../models/Order');
+const Review = require('../models/Review');
+
+const orderStatuses = [
+    'Placed',
+    'Preparing',
+    'Out for Delivery',
+    'Delivered'
+];
+
+async function getDashboardStats(req, res) {
+    try {
+        const orders = await Order.find();
+        const reviews = await Review.find();
+
+        const totalOrders = orders.length;
+
+        const pendingOrders = orders.filter(
+            order => order.status !== 'Delivered'
+        ).length;
+
+        const revenue = orders.reduce(
+            (sum, order) => sum + (order.total || 0),
+            0
+        );
+
+        const averageRating = reviews.length > 0
+            ? reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length
+            : 0;
+
+        return res.status(200).json({
+            totalOrders,
+            pendingOrders,
+            revenue,
+            totalReviews: reviews.length,
+            averageRating
+        });
+    } catch (err) {
+        console.error(err);
+
+        return res.status(500).json({
+            error: 'Server error'
+        });
+    }
+}
+
+async function renderDashboard(req, res) {
+    try {
+        const orders = await Order.find()
+            .populate('customerId', 'name email')
+            .populate('items.menuItem', 'name price')
+            .sort({ createdAt: -1 });
+
+        const reviews = await Review.find();
+
+        const totalOrders = orders.length;
+
+        const pendingOrders = orders.filter(
+            order => order.status !== 'Delivered'
+        ).length;
+
+        const revenue = orders.reduce(
+            (sum, order) => sum + (order.total || 0),
+            0
+        );
+
+        const averageRating = reviews.length > 0
+            ? reviews.reduce(
+                (sum, review) => sum + review.rating,
+                0
+            ) / reviews.length
+            : 0;
+
+        const recentOrders = orders.slice(0, 5);
+
+        return res.status(200).render('admin-dashboard', {
+            stats: {
+                totalOrders,
+                pendingOrders,
+                revenue,
+                totalReviews: reviews.length,
+                averageRating
+            },
+            recentOrders
+        });
+    } catch (err) {
+        console.error(err);
+
+        return res.status(500).json({
+            error: 'Server error'
+        });
+    }
+}
+
+async function getSalesReport(req, res) {
+    try {
+        const { startDate, endDate, status } = req.query;
+
+        const filter = {};
+
+        if (status) {
+            if (!orderStatuses.includes(status)) {
+                return res.status(400).json({
+                    error: 'Invalid order status'
+                });
+            }
+
+            filter.status = status;
+        }
+
+        if (startDate || endDate) {
+            filter.createdAt = {};
+
+            if (startDate) {
+                const start = new Date(startDate);
+
+                if (isNaN(start.getTime())) {
+                    return res.status(400).json({
+                        error: 'Invalid start date'
+                    });
+                }
+
+                filter.createdAt.$gte = start;
+            }
+
+            if (endDate) {
+                const end = new Date(endDate);
+
+                if (isNaN(end.getTime())) {
+                    return res.status(400).json({
+                        error: 'Invalid end date'
+                    });
+                }
+
+                end.setHours(23, 59, 59, 999);
+                filter.createdAt.$lte = end;
+            }
+        }
+
+        const orders = await Order.find(filter)
+            .populate('customerId', 'name email')
+            .populate('items.menuItem', 'name price')
+            .sort({ createdAt: -1 });
+
+        const totalRevenue = orders.reduce(
+            (sum, order) => sum + (order.total || 0),
+            0
+        );
+
+        return res.status(200).json({
+            totalOrders: orders.length,
+            totalRevenue,
+            orders
+        });
+    } catch (err) {
+        console.error(err);
+
+        return res.status(500).json({
+            error: 'Server error'
+        });
+    }
+}
+
+module.exports = {
+    getSalesReport,
+    getDashboardStats,
+    renderDashboard
+};
+--- reviewController.js ---
+const Review = require('../models/Review');
+
+// POST /menu/:id/reviews (customer only)
+exports.createReview = async (req, res) => {
+    try {
+        const { rating, comment } = req.body;
+        const menuItemId = req.params.id;
+
+        if (!rating || !comment) {
+            return res.status(400).json({ error: 'Rating and comment are required' });
+        }
+
+        const review = await Review.create({
+            menuItem: menuItemId,
+            user: req.user.id,
+            rating,
+            comment
+        });
+
+        res.status(201).json(review);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Could not create review' });
+    }
+};
+
+// GET /menu/:id/reviews (public É?" used by item.ejs to display reviews)
+exports.getReviewsForItem = async (req, res) => {
+    try {
+        const reviews = await Review.find({ menuItem: req.params.id })
+            .populate('user', 'name')
+            .sort({ createdAt: -1 });
+        res.json(reviews);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Could not fetch reviews' });
+    }
+};
+
+// PUT /reviews/:id (edit É?" ownership check)
+exports.updateReview = async (req, res) => {
+    try {
+        const review = await Review.findById(req.params.id);
+        if (!review) return res.status(404).json({ error: 'Review not found' });
+
+        if (review.user.toString() !== req.user.id) {
+            return res.status(403).json({ error: 'You can only edit your own review' });
+        }
+
+        const { rating, comment } = req.body;
+        if (rating) review.rating = rating;
+        if (comment) review.comment = comment;
+
+        await review.save();
+        res.json(review);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Could not update review' });
+    }
+};
+
+// DELETE /reviews/:id (delete É?" ownership check)
+exports.deleteReview = async (req, res) => {
+    try {
+        const review = await Review.findById(req.params.id);
+        if (!review) return res.status(404).json({ error: 'Review not found' });
+
+        if (review.user.toString() !== req.user.id) {
+            return res.status(403).json({ error: 'You can only delete your own review' });
+        }
+
+        await review.deleteOne();
+        res.json({ message: 'Review deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Could not delete review' });
+    }
+};
+
+// DELETE /admin/reviews/:id (admin moderation É?" no ownership check)
+exports.adminDeleteReview = async (req, res) => {
+    try {
+        const review = await Review.findById(req.params.id);
+        if (!review) return res.status(404).json({ error: 'Review not found' });
+
+        await review.deleteOne();
+        res.json({ message: 'Review deleted by admin' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Could not delete review' });
+    }
+};
+--- menu.json ---
+[
+    {
+        "id": "m1",
+        "name": "Margherita Pizza",
+        "description": "Classic tomato sauce with fresh mozzarella and basil.",
+        "price": 12.99,
+        "category": "Pizza",
+        "dietaryTags": [
+            "vegetarian"
+        ],
+        "imageUrl": "/public/images/m1-pizza.jpg",
+        "available": true
+    },
+    {
+        "id": "m2",
+        "name": "Caesar Salad",
+        "description": "Crisp romaine lettuce, Caesar dressing, croutons, and shaved Parmesan.",
+        "price": 8.99,
+        "category": "Salads",
+        "dietaryTags": [
+            "vegetarian",
+            "gluten-free"
+        ],
+        "imageUrl": "/public/images/m2-salad.jpg",
+        "available": true
+    },
+    {
+        "id": "m3",
+        "name": "Classic Burger",
+        "description": "Juicy beef patty with lettuce, tomato, onion, and our secret sauce.",
+        "price": 9.99,
+        "category": "Burgers",
+        "dietaryTags": [],
+        "imageUrl": "/public/images/m3-burger.jpg",
+        "available": true
+    },
+    {
+        "id": "m4",
+        "name": "Spaghetti Carbonara",
+        "description": "Creamy pasta with pancetta, egg yolk, and Pecorino Romano cheese.",
+        "price": 14.99,
+        "category": "Pasta",
+        "dietaryTags": [],
+        "imageUrl": "/public/images/m4-pasta.jpg",
+        "available": true
+    },
+    {
+        "id": "m5",
+        "name": "Vegan Buddha Bowl",
+        "description": "Quinoa, roasted vegetables, avocado, and tahini dressing.",
+        "price": 11.99,
+        "category": "Salads",
+        "dietaryTags": [
+            "vegan",
+            "gluten-free"
+        ],
+        "imageUrl": "/public/images/m5-bowl.jpg",
+        "available": true
+    },
+    {
+        "id": "m6",
+        "name": "Pepperoni Pizza",
+        "description": "Classic tomato sauce, mozzarella, and spicy pepperoni.",
+        "price": 14.99,
+        "category": "Pizza",
+        "dietaryTags": [],
+        "imageUrl": "/public/images/m6-pepperoni.jpg",
+        "available": true
+    },
+    {
+        "id": "m7",
+        "name": "Grilled Chicken Sandwich",
+        "description": "Grilled chicken breast with avocado, bacon, and chipotle mayo.",
+        "price": 11.99,
+        "category": "Burgers",
+        "dietaryTags": [],
+        "imageUrl": "/public/images/m7-chicken.jpg",
+        "available": true
+    },
+    {
+        "id": "m8",
+        "name": "Tiramisu",
+        "description": "Classic Italian dessert with coffee-soaked ladyfingers and mascarpone.",
+        "price": 6.99,
+        "category": "Desserts",
+        "dietaryTags": [
+            "vegetarian"
+        ],
+        "imageUrl": "/public/images/m8-tiramisu.jpg",
+        "available": true
+    },
+    {
+        "id": "m9",
+        "name": "Fresh Lemonade",
+        "description": "Freshly squeezed lemonade with a hint of mint.",
+        "price": 3.99,
+        "category": "Drinks",
+        "dietaryTags": [
+            "vegan",
+            "gluten-free"
+        ],
+        "imageUrl": "/public/images/m9-lemonade.jpg",
+        "available": true
+    },
+    {
+        "id": "m10",
+        "name": "Chocolate Lava Cake",
+        "description": "Warm chocolate cake with a gooey molten center.",
+        "price": 7.99,
+        "category": "Desserts",
+        "dietaryTags": [
+            "vegetarian"
+        ],
+        "imageUrl": "/public/images/m10-lava.jpg",
+        "available": true
+    }
+]
+--- auth.js ---
+const jwt = require('jsonwebtoken');
+
+function requireAuth(req, res, next) {
+    const token = req.cookies?.token;
+
+    if (!token) {
+        return res.status(401).json({
+            error: 'Authentication required'
+        });
+    }
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).json({
+            error: 'Invalid or expired token'
+        });
+    }
+}
+
+function requireRole(role) {
+    return function (req, res, next) {
+        if (!req.user) {
+            return res.status(401).json({
+                error: 'Authentication required'
+            });
+        }
+
+        if (req.user.role !== role) {
+            return res.status(403).json({
+                error: 'Access forbidden'
+            });
+        }
+
+        next();
+    };
+}
+
+// Éo. NEW: NonÉ?`blocking middleware to attach user if token exists
+function getCurrentUser(req, res, next) {
+    const token = req.cookies?.token;
+    if (!token) {
+        req.user = null;
+        return next();
+    }
+    try {
+        req.user = jwt.verify(token, process.env.JWT_SECRET);
+    } catch {
+        req.user = null;
+    }
+    next();
+}
+
+module.exports = {
+    requireAuth,
+    requireRole,
+    getCurrentUser
+};
+--- Category.js ---
+const mongoose = require('mongoose');
+
+const categorySchema = new mongoose.Schema({
+    name: {
+        type: String,
+        required: true,
+        unique: true
+    }
+});
+
+module.exports = mongoose.model('Category', categorySchema);
+--- MenuItem.js ---
+const mongoose = require('mongoose');
+
+const menuItemSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    description: { type: String, required: true },
+    price: { type: Number, required: true },
+    category: { type: String, required: true },
+    dietaryTags: { type: [String], default: [] },
+    imageUrl: { type: String, default: '' },
+    available: { type: Boolean, default: true }
+});
+
+module.exports = mongoose.model('MenuItem', menuItemSchema);
+--- Order.js ---
+const mongoose = require('mongoose');
+
+const orderSchema = new mongoose.Schema({
+    customerId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    },
+    items: [
+        {
+            menuItem: { type: mongoose.Schema.Types.ObjectId, ref: 'MenuItem' },
+            name: { type: String, required: true },      // Éo. Added
+            price: { type: Number, required: true },     // Éo. Added
+            quantity: { type: Number, required: true },
+            customizations: { type: String, default: '' }
+        }
+    ],
+    total: { type: Number, required: true },
+    status: {
+        type: String,
+        enum: ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'],
+        default: 'Placed'
+    },
+    scheduledFor: { type: Date, default: null },        // Éo. Added
+    createdAt: {
+        type: Date,
+        default: Date.now
+    }
+});
+
+module.exports = mongoose.model('Order', orderSchema);
+--- Review.js ---
+const mongoose = require('mongoose');
+
+const reviewSchema = new mongoose.Schema({
+    menuItem: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'MenuItem', // confirm with Track 1 that their model is named "MenuItem"
+        required: true
+    },
+    user: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User', // confirm with Track 3 (auth) that their model is named "User"
+        required: true
+    },
+    rating: {
+        type: Number,
+        required: true,
+        min: 1,
+        max: 5
+    },
+    comment: {
+        type: String,
+        required: true,
+        trim: true
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
+    }
+});
+
+module.exports = mongoose.model('Review', reviewSchema);
+--- User.js ---
+const mongoose = require('mongoose');
+
+const userSchema = new mongoose.Schema(
+    {
+        name: {
+            type: String,
+            required: true,
+            trim: true
+        },
+
+        email: {
+            type: String,
+            required: true,
+            unique: true,
+            lowercase: true,
+            trim: true
+        },
+
+        password: {
+            type: String,
+            required: true,
+            minlength: 6,
+            select: false
+        },
+
+        role: {
+            type: String,
+            enum: ['customer', 'admin'],
+            default: 'customer'
+        },
+
+        active: {
+            type: Boolean,
+            default: true
+        }
+    },
+    {
+        timestamps: true
+    }
+);
+
+module.exports = mongoose.model('User', userSchema);
+--- styles.css ---
+/* ============================================
+   FOODIEHUB - MASTER STYLES.CSS
+   Color Palette:
+   - #feffdf (Cream) - Backgrounds
+   - #ffe79a (Light Yellow) - Accents
+   - #ffa952 (Orange) - Primary Brand
+   - #ef5a5a (Red) - CTAs & Badges
+============================================ */
+
+/* ---------- GLOBAL RESET & BASE ---------- */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #feffdf;
+    color: #333;
+    line-height: 1.6;
+    padding: 20px;
+}
+
+h1,
+h2,
+h3 {
+    color: #ffa952;
+    margin-bottom: 15px;
+}
+
+a {
+    color: #ef5a5a;
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+.admin-only {
+    display: none;
+}
+
+/* ============================================
+   OMAR: NAVBAR + HERO + FOOTER
+============================================ */
+
+/* ===== NAVBAR ===== */
+header {
+    background: #fff;
+    border-bottom: 1px solid #eee;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 2rem;
+}
+
+.logo {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #ef5a5a;
+}
+
+.nav-links {
+    display: flex;
+    list-style: none;
+    gap: 1.5rem;
+    align-items: center;
+}
+
+.nav-links a {
+    text-decoration: none;
+    color: #222;
+    font-weight: 500;
+}
+
+.nav-links a:hover {
+    color: #ef5a5a;
+}
+
+#cart-badge {
+    background: #ef5a5a;
+    color: #fff;
+    border-radius: 50%;
+    padding: 0.1rem 0.5rem;
+    font-size: 0.8rem;
+    margin-left: 0.25rem;
+}
+
+/* ===== HERO ===== */
+.hero {
+    background: linear-gradient(135deg, #fff3ef, #ffe8e0);
+    padding: 3rem 2rem;
+    text-align: center;
+}
+
+.hero h1 {
+    font-size: 2rem;
+    color: #2a2a2a;
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+/* ===== FOOTER ===== */
+footer {
+    background: #2a2a2a;
+    color: #ccc;
+    text-align: center;
+    padding: 1.5rem;
+    margin-top: 3rem;
+    font-size: 0.9rem;
+}
+
+/* ============================================
+   MODERN FILTERS BAR
+============================================ */
+
+.filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1.5rem 2.5rem;
+    background: #ffffff;
+    padding: 1.2rem 2rem;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+    margin-bottom: 2rem;
+    border: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+.filter-group {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.filters label {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #888;
+    margin-right: 0.25rem;
+}
+
+.filters select {
+    padding: 0.5rem 2rem 0.5rem 1rem;
+    border: 2px solid #e9ecef;
+    border-radius: 8px;
+    background: #f8f9fa;
+    font-size: 0.9rem;
+    color: #333;
+    cursor: pointer;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23999' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.8rem center;
+    background-size: 12px;
+    min-width: 120px;
+}
+
+.filters select:hover {
+    border-color: #ffa952;
+}
+
+.filters select:focus {
+    border-color: #ffa952;
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(255, 169, 82, 0.15);
+}
+
+.filters select option {
+    padding: 8px;
+}
+
+.price-group {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+}
+
+.price-group label {
+    margin-right: 0;
+}
+
+.filters input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 140px;
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(to right, #ffa952, #ef5a5a);
+    outline: none;
+    transition: opacity 0.2s;
+    cursor: pointer;
+}
+
+.filters input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #ef5a5a;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(239, 90, 90, 0.3);
+    transition: transform 0.2s ease;
+}
+
+.filters input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.1);
+}
+
+.filters input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #ef5a5a;
+    cursor: pointer;
+    border: none;
+    box-shadow: 0 2px 8px rgba(239, 90, 90, 0.3);
+}
+
+.filters input[type="range"]:focus {
+    outline: none;
+}
+
+#price-filter-value {
+    font-weight: 700;
+    color: #ef5a5a;
+    font-size: 0.95rem;
+    min-width: 36px;
+}
+
+/* ---------- RESPONSIVE FILTERS ---------- */
+@media (max-width: 768px) {
+    .filters {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 1rem;
+        padding: 1.2rem;
+    }
+
+    .filters select {
+        width: 100%;
+    }
+
+    .price-group {
+        flex-wrap: wrap;
+        justify-content: space-between;
+    }
+
+    .filters input[type="range"] {
+        width: 100%;
+        flex: 1;
+    }
+}
+
+@media (max-width: 480px) {
+    .filters {
+        padding: 1rem;
+        gap: 0.8rem;
+    }
+
+    .filters label {
+        font-size: 0.65rem;
+    }
+
+    .filters select {
+        font-size: 0.8rem;
+        padding: 0.4rem 1.6rem 0.4rem 0.8rem;
+        min-width: 80px;
+    }
+
+    .filters input[type="range"] {
+        width: 100%;
+    }
+
+    #price-filter-value {
+        font-size: 0.85rem;
+    }
+}
+
+/* ============================================
+   MENU GRID & ITEM CARDS
+============================================ */
+
+#menu-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 25px;
+    margin-bottom: 30px;
+}
+
+.item-card {
+    background-color: #ffffff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.item-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+}
+
+.item-image {
+    width: 100%;
+    height: 200px;
+    object-fit: cover;
+    background-color: #ffe79a;
+    cursor: pointer;
+}
+
+.item-body {
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+
+.item-name {
+    font-size: 1.2rem;
+    color: #ffa952;
+    margin-bottom: 8px;
+    cursor: pointer;
+}
+
+.item-name:hover {
+    text-decoration: underline;
+}
+
+.item-description {
+    color: #666;
+    font-size: 0.9rem;
+    flex: 1;
+    margin-bottom: 15px;
+}
+
+.item-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: auto;
+}
+
+.item-price {
+    font-size: 1.3rem;
+    font-weight: bold;
+    color: #ef5a5a;
+}
+
+.add-to-cart-btn {
+    background-color: #ef5a5a;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+    font-size: 0.9rem;
+}
+
+.add-to-cart-btn:hover {
+    background-color: #c0392b;
+}
+
+/* ---------- ITEM DETAIL PAGE ---------- */
+.item-detail-container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.item-detail-container .item-card {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+
+.back-link {
+    display: inline-block;
+    margin-bottom: 20px;
+    font-weight: 500;
+}
+
+/* ---------- RESPONSIVE ---------- */
+@media (min-width: 601px) and (max-width: 899px) {
+    #menu-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 600px) {
+    body {
+        padding: 10px;
+    }
+
+    nav {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+    }
+
+    .logo {
+        text-align: center;
+    }
+
+    nav ul {
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        padding: 0;
+    }
+
+    #menu-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .hero h1 {
+        font-size: 1.8rem;
+    }
+
+    .item-detail-container {
+        padding: 10px;
+    }
+}
+
+@media (min-width: 1200px) {
+    #menu-grid {
+        grid-template-columns: repeat(4, 1fr);
+    }
+}
+
+/* ---------- UTILITIES ---------- */
+.hidden {
+    display: none !important;
+}
+
+.text-center {
+    text-align: center;
+}
+
+/* ============================================
+   MARWAN: FORMS + INPUTS + BUTTONS
+============================================ */
+
+form {
+    background-color: white;
+    padding: 25px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    max-width: 500px;
+    margin: 0 auto;
+}
+
+form label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: bold;
+    color: #333;
+}
+
+form input,
+form select,
+form textarea {
+    width: 100%;
+    padding: 10px;
+    margin-bottom: 5px;
+    border: 2px solid #ddd;
+    border-radius: 4px;
+    font-size: 1rem;
+    box-sizing: border-box;
+    transition: border-color 0.3s ease;
+}
+
+form input:focus,
+form select:focus,
+form textarea:focus {
+    border-color: #ffa952;
+    outline: none;
+    box-shadow: 0 0 5px rgba(255, 169, 82, 0.3);
+}
+
+form input.invalid {
+    border-color: #ef5a5a;
+}
+
+form input.invalid:focus {
+    border-color: #ef5a5a;
+    box-shadow: 0 0 5px rgba(239, 90, 90, 0.3);
+}
+
+.error-message {
+    color: #ef5a5a;
+    font-size: 0.85rem;
+    display: block;
+    margin-bottom: 10px;
+    min-height: 20px;
+}
+
+form button[type="submit"] {
+    background-color: #ef5a5a;
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 4px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+    width: 100%;
+    margin-top: 10px;
+}
+
+form button[type="submit"]:hover {
+    background-color: #d94a4a;
+}
+
+/* ============================================
+   MAZEN: ADMIN TABLES AND DASHBOARD
+============================================ */
+
+#stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.stat-card {
+    padding: 20px;
+    text-align: center;
+    background-color: #ffffff;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    transition: transform 0.2s ease;
+}
+
+.stat-card:hover {
+    transform: translateY(-3px);
+}
+
+.stat-card h3 {
+    margin-bottom: 10px;
+    color: #666666;
+    font-size: 1rem;
+}
+
+.stat-card span {
+    display: block;
+    color: #ef5a5a;
+    font-size: 2rem;
+    font-weight: 700;
+}
+
+#admin-orders-table {
+    width: 100%;
+    min-width: 700px;
+    margin: 0;
+    background-color: #ffffff;
+    border-collapse: collapse;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+#admin-orders-table th {
+    padding: 12px 15px;
+    color: #ffffff;
+    text-align: left;
+    background-color: #ffa952;
+}
+
+#admin-orders-table td {
+    padding: 12px 15px;
+    border-bottom: 1px solid #eeeeee;
+}
+
+#admin-orders-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+#admin-orders-table tbody tr:hover {
+    background-color: #feffdf;
+}
+
+#admin-menu-table {
+    width: 100%;
+    min-width: 700px;
+    margin: 0;
+    background-color: #ffffff;
+    border-collapse: collapse;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+#admin-menu-table th {
+    padding: 12px 15px;
+    color: #ffffff;
+    text-align: left;
+    background-color: #ffa952;
+}
+
+#admin-menu-table td {
+    padding: 12px 15px;
+    border-bottom: 1px solid #eeeeee;
+}
+
+#admin-menu-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+#admin-menu-table tbody tr:hover {
+    background-color: #feffdf;
+}
+
+.status-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.status-placed {
+    color: #ffffff;
+    background-color: #ffa952;
+}
+
+.status-preparing {
+    color: #333333;
+    background-color: #ffe79a;
+}
+
+.status-out-for-delivery {
+    color: #ffffff;
+    background-color: #ef5a5a;
+}
+
+.status-delivered {
+    color: #ffffff;
+    background-color: #2ecc71;
+}
+
+.action-btn {
+    padding: 6px 10px;
+    border: 0;
+    border-radius: 4px;
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.action-btn.update-status {
+    color: #333333;
+    background-color: #ffe79a;
+}
+
+.action-btn.edit {
+    color: #ffffff;
+    background-color: #ffa952;
+}
+
+.action-btn.delete {
+    color: #ffffff;
+    background-color: #ef5a5a;
+}
+
+.action-btn:hover {
+    opacity: 0.85;
+}
+
+.action-btn:active {
+    transform: translateY(1px);
+}
+
+/* ============================================
+   YASSIN: RESPONSIVE + UTILITIES
+============================================ */
+
+.hidden {
+    display: none !important;
+}
+
+.text-center {
+    text-align: center;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 15px;
+}
+
+.margin-top-20 {
+    margin-top: 20px;
+}
+
+.margin-bottom-20 {
+    margin-bottom: 20px;
+}
+
+#status-stepper {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    max-width: 600px;
+    margin: 20px auto;
+    padding: 20px;
+}
+
+.step {
+    padding: 10px 15px;
+    border-radius: 20px;
+    background-color: #e9ecef;
+    color: #666;
+    transition: all 0.3s ease;
+    font-weight: bold;
+    text-align: center;
+    flex: 1;
+    margin: 0 5px;
+}
+
+.step.active {
+    background-color: #ef5a5a;
+    color: white;
+    transform: scale(1.05);
+}
+
+.step.inactive {
+    opacity: 0.4;
+}
+
+@media (max-width: 600px) {
+    #status-stepper {
+        flex-direction: column;
+        align-items: center;
+        gap: 5px;
+    }
+
+    .step {
+        width: 100%;
+        text-align: center;
+        padding: 8px;
+    }
+}
+
+.cart-item {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+    padding: 10px;
+    border-bottom: 1px solid #ffe79a;
+    flex-wrap: wrap;
+    background-color: #feffdf;
+    border-radius: 4px;
+    margin-bottom: 5px;
+}
+
+.cart-item .cart-item-qty {
+    width: 60px;
+    padding: 5px;
+    border: 1px solid #ffe79a;
+    border-radius: 4px;
+    background-color: #feffdf;
+}
+
+.order-item {
+    background: #fff;
+    padding: 15px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    margin-bottom: 15px;
+}
+
+.order-item h4 {
+    color: #ffa952;
+    margin-bottom: 5px;
+}
+
+.order-item button {
+    background-color: #ef5a5a;
+    color: white;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-top: 10px;
+}
+
+.order-item button:hover {
+    background-color: #d94a4a;
+}
+--- admin.js ---
+/* ============================================
+   ADMIN.JS - Admin Dashboard & Orders (Real API)
+============================================ */
+
+let currentUser = { role: 'customer' };
+
+function toggleAdminLinks() {
+    const adminElements = document.querySelectorAll('.admin-only');
+    const isAdmin = currentUser.role === 'admin';
+    adminElements.forEach(el => {
+        if (isAdmin) {
+            el.classList.remove('hidden');
+        } else {
+            el.classList.add('hidden');
+        }
+    });
+}
+
+// Éo. NEW: fetch the real user role from the server
+async function loadCurrentUser() {
+    try {
+        const res = await fetch('/me');
+        const data = await res.json();
+        currentUser.role = data.role || 'customer';
+    } catch {
+        currentUser.role = 'customer';
+    }
+    toggleAdminLinks();
+}
+
+window.toggleUserRole = function () {
+    currentUser.role = currentUser.role === 'customer' ? 'admin' : 'customer';
+    toggleAdminLinks();
+    renderAdminTables();
+    renderMenuTable();
+    console.log('Current role:', currentUser.role);
+};
+
+// ===== ADMIN ORDERS =====
+async function renderAdminTables() {
+    try {
+        const response = await fetch('/admin/orders');
+        if (!response.ok) {
+            throw new Error('Failed to fetch orders');
+        }
+        const orders = await response.json();
+
+        const ordersTable = document.getElementById('admin-orders-table');
+        if (ordersTable) {
+            const tbody = ordersTable.querySelector('tbody');
+            if (tbody) {
+                let html = '';
+                orders.forEach(order => {
+                    html += `
+                        <tr>
+                            <td>#${order._id.slice(-6)}</td>
+                            <td>${order.customerId?.name || 'Unknown'}</td>
+                            <td>${order.items.length}</td>
+                            <td>$${order.total?.toFixed(2) || '0.00'}</td>
+                            <td><span class="status-badge status-${order.status?.replace(/ /g, '-').toLowerCase() || 'placed'}">${order.status || 'Placed'}</span></td>
+                            <td>
+                                <button class="action-btn update-status" onclick="updateOrderStatus('${order._id}')">Update</button>
+                            </td>
+                        </tr>
+                    `;
+                });
+                tbody.innerHTML = html;
+            }
+        }
+
+        // Update dashboard stats
+        const totalOrders = document.getElementById('total-orders');
+        const totalRevenue = document.getElementById('total-revenue');
+        const pendingOrders = document.getElementById('pending-orders');
+        if (totalOrders) totalOrders.textContent = orders.length;
+        if (totalRevenue) {
+            const revenue = orders.reduce((sum, o) => sum + (o.total || 0), 0);
+            totalRevenue.textContent = `$${revenue.toFixed(2)}`;
+        }
+        if (pendingOrders) {
+            const pending = orders.filter(o => o.status !== 'Delivered');
+            pendingOrders.textContent = pending.length;
+        }
+    } catch (err) {
+        console.error('Error loading orders:', err);
+        alert('Could not load orders. Please refresh.');
+    }
+}
+
+async function updateOrderStatus(orderId) {
+    try {
+        // Get current status from the table or ask user
+        const newStatus = prompt('Enter new status (Placed, Preparing, Out for Delivery, Delivered):');
+        if (!newStatus) return;
+        const validStatuses = ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'];
+        if (!validStatuses.includes(newStatus)) {
+            alert('Invalid status. Please use: ' + validStatuses.join(', '));
+            return;
+        }
+
+        const response = await fetch(`/admin/orders/${orderId}/status`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: newStatus })
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            alert(data.error || 'Could not update order status');
+            return;
+        }
+
+        window.location.reload();
+    } catch (err) {
+        console.error(err);
+        alert('Could not update order status');
+    }
+}
+
+// ===== ADMIN MENU MANAGEMENT =====
+async function renderMenuTable() {
+    const menuTable = document.getElementById('admin-menu-table');
+    if (!menuTable) return;
+
+    try {
+        const response = await fetch('/menu');
+        if (!response.ok) {
+            throw new Error('Failed to fetch menu');
+        }
+        const items = await response.json();
+
+        const tbody = menuTable.querySelector('tbody');
+        if (!tbody) return;
+
+        if (items.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6">No menu items found.</td></tr>';
+            return;
+        }
+
+        let html = '';
+        items.forEach(item => {
+            html += `
+                <tr>
+                    <td>${item.name}</td>
+                    <td>${item.category || 'Uncategorized'}</td>
+                    <td>$${item.price?.toFixed(2) || '0.00'}</td>
+                    <td>${item.available ? 'Éo. Available' : 'É?O Unavailable'}</td>
+                    <td>
+                        <button class="action-btn edit" onclick="editMenuItem('${item._id}')">Edit</button>
+                        <button class="action-btn delete" onclick="deleteMenuItem('${item._id}')">Delete</button>
+                    </td>
+                </tr>
+            `;
+        });
+        tbody.innerHTML = html;
+    } catch (err) {
+        console.error('Error loading menu:', err);
+        alert('Could not load menu. Please refresh.');
+    }
+}
+
+async function editMenuItem(itemId) {
+    try {
+        // Fetch current item data
+        const response = await fetch(`/menu/${itemId}`);
+        if (!response.ok) {
+            alert('Item not found');
+            return;
+        }
+        const item = await response.json();
+
+        // Prompt for new values
+        const newName = prompt('Edit item name:', item.name) || item.name;
+        const newDesc = prompt('Edit item description:', item.description) || item.description;
+        const newPrice = parseFloat(prompt('Edit item price:', item.price)) || item.price;
+        const newCategory = prompt('Edit item category:', item.category) || item.category;
+        const newAvailable = confirm('Is this item available? Click OK for Yes, Cancel for No.');
+
+        const updatedItem = {
+            name: newName,
+            description: newDesc,
+            price: newPrice,
+            category: newCategory,
+            available: newAvailable,
+            dietaryTags: item.dietaryTags || [],
+            imageUrl: item.imageUrl || ''
+        };
+
+        const updateResponse = await fetch(`/menu/admin/menu-items/${itemId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updatedItem)
+        });
+
+        if (!updateResponse.ok) {
+            const data = await updateResponse.json();
+            alert(data.error || 'Update failed');
+            return;
+        }
+
+        alert('Item updated successfully!');
+        renderMenuTable();
+        if (typeof loadMenuItems === 'function') loadMenuItems();
+    } catch (err) {
+        console.error(err);
+        alert('Could not edit item');
+    }
+}
+
+async function deleteMenuItem(itemId) {
+    if (!confirm('Are you sure you want to delete this item?')) return;
+    try {
+        const response = await fetch(`/menu/admin/menu-items/${itemId}`, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            alert(data.error || 'Delete failed');
+            return;
+        }
+
+        alert('Item deleted successfully!');
+        renderMenuTable();
+        if (typeof loadMenuItems === 'function') loadMenuItems();
+    } catch (err) {
+        console.error(err);
+        alert('Could not delete item');
+    }
+}
+
+// ===== ADD NEW MENU ITEM (Step 5) =====
+async function submitNewItem(e) {
+    e.preventDefault();
+
+    const name = document.getElementById('item-name').value.trim();
+    const description = document.getElementById('item-description').value.trim();
+    const price = parseFloat(document.getElementById('item-price').value);
+    const category = document.getElementById('item-category').value;
+    const stock = parseInt(document.getElementById('item-stock').value);
+
+    // Validate
+    if (!name || !description || isNaN(price) || price <= 0 || isNaN(stock) || stock < 0) {
+        alert('Please fill all fields correctly.');
+        return false;
+    }
+
+    const newItem = {
+        name,
+        description,
+        price,
+        category,
+        available: true,
+        dietaryTags: [],
+        imageUrl: ''
+    };
+
+    try {
+        const res = await fetch('/menu/admin/menu-items', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newItem)
+        });
+
+        if (!res.ok) {
+            const data = await res.json();
+            alert(data.error || 'Could not add item');
+            return false;
+        }
+
+        alert('Item added successfully!');
+        document.getElementById('add-item-form').reset();
+        renderMenuTable(); // refresh the admin table
+        if (typeof loadMenuItems === 'function') loadMenuItems(); // refresh main menu
+    } catch (err) {
+        console.error(err);
+        alert('Could not add item');
+    }
+    return false;
+}
+window.submitNewItem = submitNewItem;
+
+// ===== ORDER TRACKING POLLING (REAL) =====
+let trackingInterval = null;
+
+function startTracking(orderId) {
+    const statusText = document.getElementById('status-text');
+    const steps = document.querySelectorAll('.step');
+    if (!statusText) return;
+
+    async function fetchStatus() {
+        try {
+            const response = await fetch(`/orders/${orderId}/status`);
+            if (!response.ok) {
+                throw new Error('Failed to fetch status');
+            }
+            const data = await response.json();
+            const currentStatus = data.status || 'Placed';
+
+            statusText.textContent = currentStatus;
+            const statuses = ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'];
+            const idx = statuses.indexOf(currentStatus);
+            if (idx !== -1) {
+                steps.forEach((step, i) => {
+                    if (i <= idx) {
+                        step.classList.add('active');
+                        step.classList.remove('inactive');
+                    } else {
+                        step.classList.remove('active');
+                        step.classList.add('inactive');
+                    }
+                });
+            }
+
+            if (currentStatus === 'Delivered') {
+                clearInterval(trackingInterval);
+                trackingInterval = null;
+            }
+        } catch (err) {
+            console.error('Error fetching status:', err);
+        }
+    }
+
+    fetchStatus();
+    trackingInterval = setInterval(fetchStatus, 3000);
+}
+
+// ===== DOM INIT =====
+document.addEventListener('DOMContentLoaded', function () {
+    loadCurrentUser();   // <-- was toggleAdminLinks()
+    renderMenuTable();
+
+    const statusText = document.getElementById('status-text');
+    if (statusText) {
+        const orderIdEl = document.getElementById('order-id');
+        const orderId = orderIdEl ? orderIdEl.textContent.trim() : null;
+        if (orderId) {
+            startTracking(orderId);
+        } else {
+            statusText.textContent = 'No order ID found';
+        }
+    }
+});
+--- auth-status.js ---
+// Parse user from login response and store customerId
+document.addEventListener('DOMContentLoaded', function () {
+    // Check if user is logged in by looking for a cookie or API call
+    // For now, we'll set it from sessionStorage if available
+    const user = sessionStorage.getItem('user');
+    if (user) {
+        const parsed = JSON.parse(user);
+        if (parsed.id) {
+            sessionStorage.setItem('customerId', parsed.id);
+        }
+    }
+});
+--- cart.js ---
+/* ============================================
+   OMAR HASSAN: CART.JS - Cart Logic + Badge
+============================================ */
+
+let cart = [];
+
+// Load cart from sessionStorage on page load
+cart = JSON.parse(sessionStorage.getItem('cart') || '[]');
+
+function saveCart() {
+    sessionStorage.setItem('cart', JSON.stringify(cart));
+}
+
+function addToCart(menuItem, quantity = 1, customizations = '') {
+    if (!menuItem) return;
+    const existingItem = cart.find(item => item.menuItemId === menuItem._id);
+    if (existingItem) {
+        existingItem.quantity += quantity;
+    } else {
+        cart.push({
+            cartItemId: 'c' + Date.now(),
+            menuItemId: menuItem._id,
+            name: menuItem.name,
+            price: menuItem.price,
+            quantity: quantity,
+            customizations: customizations || ''
+        });
+    }
+    saveCart();       // Éo. Save after modifying
+    updateCartUI();
+}
+
+function removeFromCart(cartItemId) {
+    cart = cart.filter(item => item.cartItemId !== cartItemId);
+    saveCart();       // Éo. Save after modifying
+    updateCartUI();
+}
+
+function updateQuantity(cartItemId, newQuantity) {
+    const item = cart.find(i => i.cartItemId === cartItemId);
+    if (!item) return;
+    if (newQuantity <= 0) {
+        removeFromCart(cartItemId);
+        return;
+    }
+    item.quantity = newQuantity;
+    saveCart();       // Éo. Save after modifying
+    updateCartUI();
+}
+
+function updateCartBadge() {
+    const badge = document.getElementById('cart-badge');
+    if (badge) {
+        const totalItems = cart.reduce((sum, item) => sum + item.quantity, 0);
+        badge.textContent = totalItems;
+    }
+}
+
+function renderCartItems() {
+    const container = document.getElementById('cart-items');
+    if (!container) return;
+
+    if (cart.length === 0) {
+        container.innerHTML = '<p>Your cart is empty.</p>';
+        const totalEl = document.getElementById('cart-total');
+        if (totalEl) totalEl.textContent = 'Total: $0.00';
+        return;
+    }
+
+    let html = '';
+    let cartTotal = 0;
+    cart.forEach(item => {
+        const subtotal = item.price * item.quantity;
+        cartTotal += subtotal;
+        html += `
+            <div class="cart-item" data-id="${item.cartItemId}">
+                <span class="cart-item-name">${item.name}</span>
+                <span class="cart-item-price">$${item.price.toFixed(2)}</span>
+                <input type="number" class="cart-item-qty" value="${item.quantity}" min="1"
+                       onchange="updateQuantity('${item.cartItemId}', parseInt(this.value))">
+                <span class="cart-item-subtotal">$${subtotal.toFixed(2)}</span>
+                <button onclick="removeFromCart('${item.cartItemId}')">Remove</button>
+                ${item.customizations ? `<p class="cart-item-custom">Custom: ${item.customizations}</p>` : ''}
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+    const totalEl = document.getElementById('cart-total');
+    if (totalEl) totalEl.textContent = `Total: $${cartTotal.toFixed(2)}`;
+}
+
+function updateCartUI() {
+    updateCartBadge();
+    renderCartItems();
+}
+
+// ===== ORDER HISTORY =====
+async function loadOrderHistory() {
+    try {
+        const response = await fetch('/orders');
+        if (!response.ok) throw new Error('Failed to fetch order history');
+        return await response.json();
+    } catch (err) {
+        console.error('Error loading order history:', err);
+        return [];
+    }
+}
+
+async function renderOrderHistory() {
+    const container = document.getElementById('order-history-list');
+    if (!container) return;
+    const orders = await loadOrderHistory();
+    if (!orders || orders.length === 0) {
+        container.innerHTML = '<p>You have no past orders.</p>';
+        return;
+    }
+
+    let html = '';
+    orders.forEach(order => {
+        html += `
+            <div class="order-item">
+                <h4>Order #${order._id.slice(-6)}</h4>
+                <p>Date: ${new Date(order.createdAt).toLocaleString()}</p>
+                <p>Status: ${order.status}</p>
+                <p>Total: $${order.total?.toFixed(2) || '0.00'}</p>
+                <button onclick="reorder('${order._id}')">Reorder</button>
+            </div>
+        `;
+    });
+    container.innerHTML = html;
+}
+
+async function reorder(orderId) {
+    try {
+        const response = await fetch(`/orders/${orderId}`);
+        if (!response.ok) {
+            alert('Order not found');
+            return;
+        }
+        const order = await response.json();
+
+        order.items.forEach(item => {
+            const menuItem = window.menuItems?.find(i => i._id === item.menuItem?._id);
+            if (menuItem) {
+                addToCart(menuItem, item.quantity, item.customizations || '');
+            } else {
+                console.warn('Menu item not found:', item.menuItem);
+            }
+        });
+
+        alert('Items added to cart!');
+        window.location.href = '/cart';
+    } catch (err) {
+        console.error(err);
+        alert('Could not reorder');
+    }
+}
+
+// ===== DOM INIT =====
+document.addEventListener('DOMContentLoaded', function () {
+    updateCartUI();
+    renderOrderHistory();
+});
+
+// Expose functions globally
+window.addToCart = addToCart;
+window.removeFromCart = removeFromCart;
+window.updateQuantity = updateQuantity;
+window.reorder = reorder;
+window.renderOrderHistory = renderOrderHistory;
+--- fetch.js ---
+/* ============================================
+   FETCH.JS - AJAX from real backend API
+============================================ */
+
+const API_BASE = '/';
+
+async function loadMenuItems() {
+    try {
+        console.log('Fetching menu from API:', API_BASE + 'menu');
+        const response = await fetch(API_BASE + 'menu');
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log('Menu loaded successfully from API:', data.length, 'items');
+
+        // Store globally
+        window.menuItems = data;
+
+        // Call setMenuItems if available
+        if (typeof setMenuItems === 'function') {
+            setMenuItems(data);
+        } else {
+            console.warn('setMenuItems function not found');
+        }
+
+        // Éo. Render admin tables ONLY if the admin-menu-table exists on this page
+        if (typeof renderAdminTables === 'function' && document.getElementById('admin-menu-table')) {
+            renderAdminTables();
+        }
+
+        return data;
+    } catch (error) {
+        console.error('Error loading menu from API:', error);
+        // Éo. Only show alert if we're on a page that needs menu (not admin pages)
+        if (document.getElementById('menu-grid')) {
+            alert('Could not load menu. Please refresh the page or try again later.');
+        }
+        return [];
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    console.log('fetch.js DOM loaded');
+
+    if (document.getElementById('menu-grid')) {
+        loadMenuItems();
+    }
+
+    if (document.getElementById('admin-menu-table')) {
+        if (typeof window.menuItems !== 'undefined' && window.menuItems.length === 0) {
+            loadMenuItems();
+        } else {
+            if (typeof renderAdminTables === 'function') {
+                setTimeout(renderAdminTables, 100);
+            }
+        }
+    }
+
+    if (document.getElementById('cart-items')) {
+        if (typeof updateCartUI === 'function') {
+            setTimeout(updateCartUI, 50);
+        }
+    }
+
+    if (document.getElementById('order-history-list')) {
+        if (typeof renderOrderHistory === 'function') {
+            setTimeout(renderOrderHistory, 50);
+        }
+    }
+
+    if (document.getElementById('item-detail')) {
+        console.log('fetch.js: item detail page detected');
+        // If data is already loaded, render immediately
+        if (window.menuItems && window.menuItems.length > 0) {
+            if (typeof renderItemDetail === 'function') {
+                setTimeout(renderItemDetail, 100);
+            }
+        } else {
+            // Otherwise load data first
+            loadMenuItems();
+        }
+    }
+});
+--- menu.js ---
+/* ============================================
+   OMAR: MENU.JS - Menu Rendering + Filtering
+   + Item Detail Page Support
+============================================ */
+
+// Make menuItems globally accessible
+let menuItems = [];
+window.menuItems = [];
+
+function getFoodEmoji(category) {
+    const emojis = {
+        'Pizza': 'dY?',
+        'Burgers': 'dY?"',
+        'Salads': 'dYù-',
+        'Drinks': 'dYù',
+        'Desserts': 'dY?¯',
+        'Pasta': 'dY??'
+    };
+    return emojis[category] || 'dY?´ã,?';
+}
+
+/**
+ * Renders menu items to #menu-grid
+ */
+function renderMenu(items) {
+    const grid = document.getElementById('menu-grid');
+    if (!grid) return;
+    if (!items || items.length === 0) {
+        grid.innerHTML = '<p>No menu items found. Please try adjusting your filters.</p>';
+        return;
+    }
+
+    let html = '';
+    items.forEach(item => {
+        html += `
+            <div class="item-card" data-id="${item._id}">
+                <img src="${item.imageUrl || 'https://via.placeholder.com/300x200?text=Food'}"
+                     alt="${item.name}"
+                     class="item-image"
+                     onclick="goToItem('${item._id}')"
+                     onerror="this.src='https://via.placeholder.com/300x200?text=Food'">
+                <div class="item-body">
+                    <h3 class="item-name" onclick="goToItem('${item._id}')">${item.name}</h3>
+                    <p class="item-description">${item.description}</p>
+                    <div class="item-footer">
+                        <span class="item-price">$${item.price.toFixed(2)}</span>
+                        <button class="add-to-cart-btn" onclick="addToCartFromMenu('${item._id}')">
+                            Add to Cart
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+    grid.innerHTML = html;
+}
+
+/**
+ * Navigate to item detail page
+ */
+function goToItem(itemId) {
+    if (itemId) {
+        sessionStorage.setItem('selectedItemId', itemId);
+        window.location.href = '/item';
+    }
+}
+
+/**
+ * Add to cart from menu page
+ */
+function addToCartFromMenu(itemId) {
+    if (typeof addToCart === 'function') {
+        const items = window.menuItems || menuItems || [];
+        const item = items.find(i => i._id === itemId);
+        if (item) {
+            addToCart(item, 1, '');
+            alert(`${item.name} added to cart!`);
+        } else {
+            alert('Item not found');
+        }
+    } else {
+        alert('Cart functionality not available');
+    }
+}
+
+/**
+ * Renders single item detail on item page
+ */
+function renderItemDetail() {
+    console.log('renderItemDetail called');
+
+    // Try multiple sources for menu items
+    let items = [];
+    if (menuItems && menuItems.length > 0) {
+        items = menuItems;
+    } else if (window.menuItems && window.menuItems.length > 0) {
+        items = window.menuItems;
+    }
+
+    if (!items || items.length === 0) {
+        console.log('No menu items found. Retrying in 500ms...');
+        setTimeout(renderItemDetail, 500);
+        return;
+    }
+
+    // Get the item ID from sessionStorage
+    const itemId = sessionStorage.getItem('selectedItemId');
+    if (!itemId) {
+        document.getElementById('item-name').textContent = 'No item selected';
+        return;
+    }
+
+    // Find the item
+    const item = items.find(i => i._id === itemId);
+    if (!item) {
+        document.getElementById('item-name').textContent = 'Item not found';
+        return;
+    }
+
+    // Populate the page
+    const imageEl = document.getElementById('item-image');
+    if (imageEl) {
+        if (item.imageUrl) {
+            imageEl.src = item.imageUrl;
+            imageEl.alt = item.name;
+            imageEl.onerror = function () {
+                this.outerHTML = `<div style="display:flex; align-items:center; justify-content:center; background:#ffe79a; height:200px; font-size:4rem; border-radius:8px 8px 0 0;">${getFoodEmoji(item.category)}</div>`;
+            };
+        } else {
+            imageEl.outerHTML = `<div style="display:flex; align-items:center; justify-content:center; background:#ffe79a; height:200px; font-size:4rem; border-radius:8px 8px 0 0;">${getFoodEmoji(item.category)}</div>`;
+        }
+    }
+
+    const nameEl = document.getElementById('item-name');
+    if (nameEl) nameEl.textContent = item.name;
+
+    const descEl = document.getElementById('item-description');
+    if (descEl) descEl.textContent = item.description;
+
+    const priceEl = document.getElementById('item-price');
+    if (priceEl) priceEl.textContent = `$${item.price.toFixed(2)}`;
+
+    const addBtn = document.getElementById('add-to-cart-btn');
+    if (addBtn) {
+        addBtn.onclick = function () {
+            const quantity = parseInt(document.getElementById('item-quantity').value) || 1;
+            const customizations = document.getElementById('item-customizations').value || '';
+            if (typeof addToCart === 'function') {
+                addToCart(item, quantity, customizations);
+            }
+            alert(`${item.name} added to cart!`);
+            window.location.href = '/cart';
+        };
+    }
+
+    console.log('Item detail rendered successfully!');
+}
+
+/**
+ * Filters menu items based on category, price, and diet
+ */
+function filterMenu() {
+    const category = document.getElementById('category-filter')?.value || 'all';
+    const maxPrice = parseFloat(document.getElementById('price-filter')?.value) || Infinity;
+    const diet = document.getElementById('diet-filter')?.value || 'all';
+
+    let filtered = [...menuItems];
+
+    if (category !== 'all') {
+        filtered = filtered.filter(item => item.category === category);
+    }
+    if (maxPrice > 0) {
+        filtered = filtered.filter(item => item.price <= maxPrice);
+    }
+    if (diet !== 'all') {
+        filtered = filtered.filter(item => item.dietaryTags && item.dietaryTags.includes(diet));
+    }
+
+    renderMenu(filtered);
+}
+
+/**
+ * Initializes filter event listeners
+ */
+function setupFilters() {
+    const categoryFilter = document.getElementById('category-filter');
+    const priceFilter = document.getElementById('price-filter');
+    const dietFilter = document.getElementById('diet-filter');
+
+    if (categoryFilter) categoryFilter.addEventListener('change', filterMenu);
+    if (priceFilter) {
+        priceFilter.addEventListener('input', function () {
+            const value = document.getElementById('price-filter-value');
+            if (value) value.textContent = '$' + this.value;
+            filterMenu();
+        });
+    }
+    if (dietFilter) dietFilter.addEventListener('change', filterMenu);
+}
+
+/**
+ * Receives data from fetch.js and renders the menu
+ */
+function setMenuItems(items) {
+    console.log('setMenuItems called with', items?.length || 0, 'items');
+    menuItems = items || [];
+    window.menuItems = menuItems;
+    renderMenu(menuItems);
+    setupFilters();
+
+    if (document.getElementById('item-detail')) {
+        setTimeout(renderItemDetail, 100);
+    }
+}
+
+// Run when DOM is ready
+document.addEventListener('DOMContentLoaded', function () {
+    console.log('menu.js DOM loaded');
+
+    if (document.getElementById('item-detail')) {
+        setTimeout(renderItemDetail, 300);
+    } else if (menuItems && menuItems.length > 0) {
+        renderMenu(menuItems);
+        setupFilters();
+    }
+});
+
+// Listen for storage changes
+window.addEventListener('storage', function (e) {
+    if (e.key === 'selectedItemId' && document.getElementById('item-detail')) {
+        renderItemDetail();
+    }
+});
+
+// Export for global use
+window.goToItem = goToItem;
+window.filterMenu = filterMenu;
+window.setMenuItems = setMenuItems;
+window.renderItemDetail = renderItemDetail;
+window.addToCartFromMenu = addToCartFromMenu;
+--- reviews.js ---
+// reviews.js É?" handles the review list + form on the item detail page (Track 5)
+
+(function () {
+    // Read itemId from sessionStorage (set by menu.js goToItem)
+    const itemId = sessionStorage.getItem('selectedItemId');
+
+    const reviewsListEl = document.getElementById('reviews-list');
+    const reviewFormEl = document.getElementById('review-form');
+
+    if (!itemId) {
+        if (reviewsListEl) reviewsListEl.innerHTML = '<p>No item selected.</p>';
+        return;
+    }
+
+    function loadReviews() {
+        fetch(`/menu/${itemId}/reviews`)
+            .then(res => res.json())
+            .then(reviews => {
+                reviewsListEl.innerHTML = '';
+                if (reviews.length === 0) {
+                    reviewsListEl.innerHTML = '<p>No reviews yet. Be the first!</p>';
+                    return;
+                }
+                reviews.forEach(review => {
+                    const div = document.createElement('div');
+                    div.className = 'review-item';
+                    div.innerHTML = `
+                        <p class="review-rating">Rating: ${review.rating} / 5</p>
+                        <p class="review-comment">${review.comment}</p>
+                        <p class="review-author">- ${review.user && review.user.name ? review.user.name : 'Anonymous'}</p>
+                    `;
+                    reviewsListEl.appendChild(div);
+                });
+            })
+            .catch(err => console.error('Could not load reviews:', err));
+    }
+
+    if (reviewFormEl) {
+        reviewFormEl.addEventListener('submit', function (e) {
+            e.preventDefault();
+            const rating = document.getElementById('review-rating').value;
+            const comment = document.getElementById('review-comment').value;
+
+            fetch(`/menu/${itemId}/reviews`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ rating, comment })
+            })
+                .then(res => {
+                    if (!res.ok) throw new Error('Could not submit review');
+                    return res.json();
+                })
+                .then(() => {
+                    reviewFormEl.reset();
+                    loadReviews();
+                })
+                .catch(err => {
+                    alert('Error submitting review. Are you logged in as a customer?');
+                    console.error(err);
+                });
+        });
+    }
+
+    loadReviews();
+})();
+--- validation.js ---
+/* ============================================
+   MARWAN: VALIDATION.JS - All Form Validation
+   (Now uses inline errors and real form submission)
+============================================ */
+
+function clearAllErrors() {
+    const errorSpans = document.querySelectorAll('.error-message');
+    errorSpans.forEach(el => el.textContent = '');
+    document.querySelectorAll('.invalid').forEach(el => el.classList.remove('invalid'));
+}
+
+// --- LOGIN ---
+function validateLogin() {
+    clearAllErrors();
+    let valid = true;
+
+    const email = document.getElementById('login-email');
+    const password = document.getElementById('login-password');
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[a-z]{2,3}$/;
+
+    if (!email || !emailPattern.test(email.value)) {
+        const error = document.getElementById('login-email-error');
+        if (error) error.textContent = 'Please enter a valid email address.';
+        if (email) email.classList.add('invalid');
+        valid = false;
+    }
+
+    if (!password || password.value.length < 6) {
+        const error = document.getElementById('login-password-error');
+        if (error) error.textContent = 'Password must be at least 6 characters.';
+        if (password) password.classList.add('invalid');
+        valid = false;
+    }
+
+    return valid; // If valid, form submits normally
+}
+
+// --- REGISTER ---
+function validateRegister() {
+    clearAllErrors();
+    let valid = true;
+
+    const name = document.getElementById('register-name');
+    const email = document.getElementById('register-email');
+    const password = document.getElementById('register-password');
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[a-z]{2,3}$/;
+
+    if (!name || name.value.trim() === '') {
+        const error = document.getElementById('register-name-error');
+        if (error) error.textContent = 'Full name is required.';
+        if (name) name.classList.add('invalid');
+        valid = false;
+    }
+
+    if (!email || !emailPattern.test(email.value)) {
+        const error = document.getElementById('register-email-error');
+        if (error) error.textContent = 'Please enter a valid email address.';
+        if (email) email.classList.add('invalid');
+        valid = false;
+    }
+
+    if (!password || password.value.length < 6) {
+        const error = document.getElementById('register-password-error');
+        if (error) error.textContent = 'Password must be at least 6 characters.';
+        if (password) password.classList.add('invalid');
+        valid = false;
+    }
+
+    return valid;
+}
+
+// --- CHECKOUT ---
+function validateCheckout() {
+    clearAllErrors();
+    let valid = true;
+
+    const address = document.getElementById('delivery-address');
+    const scheduleTime = document.getElementById('schedule-time');
+
+    if (!address || address.value.trim() === '') {
+        const error = document.getElementById('delivery-address-error');
+        if (error) error.textContent = 'Delivery address is required.';
+        if (address) address.classList.add('invalid');
+        valid = false;
+    }
+
+    if (scheduleTime && scheduleTime.value) {
+        const selectedDate = new Date(scheduleTime.value);
+        const now = new Date();
+        if (selectedDate < now) {
+            const error = document.getElementById('schedule-time-error');
+            if (error) error.textContent = 'Please select a future date and time.';
+            if (scheduleTime) scheduleTime.classList.add('invalid');
+            valid = false;
+        }
+    }
+
+    // Cart validation É?" check if cart is empty
+    if (typeof cart !== 'undefined' && cart.length === 0) {
+        const cartError = document.getElementById('cart-error');
+        if (cartError) cartError.textContent = 'Your cart is empty. Add items before checkout.';
+        valid = false;
+    }
+
+    return valid; // If valid, form submits normally
+}
+
+// --- ADMIN: ADD/EDIT MENU ITEM ---
+function validateAddItem() {
+    clearAllErrors();
+    let valid = true;
+
+    const name = document.getElementById('item-name');
+    const price = document.getElementById('item-price');
+    const stock = document.getElementById('item-stock');
+
+    if (!name || name.value.trim() === '') {
+        const error = document.getElementById('item-name-error');
+        if (error) error.textContent = 'Item name is required.';
+        if (name) name.classList.add('invalid');
+        valid = false;
+    }
+
+    if (!price || parseFloat(price.value) <= 0) {
+        const error = document.getElementById('item-price-error');
+        if (error) error.textContent = 'Please enter a valid price (greater than 0).';
+        if (price) price.classList.add('invalid');
+        valid = false;
+    }
+
+    if (!stock || parseInt(stock.value) < 0) {
+        const error = document.getElementById('item-stock-error');
+        if (error) error.textContent = 'Please enter a valid stock quantity (0 or more).';
+        if (stock) stock.classList.add('invalid');
+        valid = false;
+    }
+
+    return valid;
+}
+
+// --- WIRE UP FORMS ---
+document.addEventListener('DOMContentLoaded', function () {
+    const loginForm = document.getElementById('login-form');
+    if (loginForm) loginForm.onsubmit = validateLogin;
+
+    const registerForm = document.getElementById('register-form');
+    if (registerForm) registerForm.onsubmit = validateRegister;
+
+    const checkoutForm = document.getElementById('checkout-form');
+    if (checkoutForm) checkoutForm.onsubmit = validateCheckout;
+
+    const addItemForm = document.getElementById('add-item-form');
+    if (addItemForm) addItemForm.onsubmit = validateAddItem;
+
+    // Also wire up admin menu edit form if it exists (for admin-menu-manage.ejs)
+    const editItemForm = document.getElementById('edit-item-form');
+    if (editItemForm) editItemForm.onsubmit = validateAddItem;
+});
+--- adminOrders.js ---
+const express = require('express');
+const {
+    requireAuth,
+    requireRole
+} = require('../middleware/auth');
+const {
+    getOrders,
+    updateOrderStatus
+} = require('../controllers/adminOrderController');
+
+const router = express.Router();
+
+router.get(
+    '/orders',
+    requireAuth,
+    requireRole('admin'),
+    getOrders
+);
+
+router.put(
+    '/orders/:id/status',
+    requireAuth,
+    requireRole('admin'),
+    updateOrderStatus
+);
+
+module.exports = router;
+--- adminReports.js ---
+const express = require('express');
+const {
+    requireAuth,
+    requireRole
+} = require('../middleware/auth');
+const {
+    getSalesReport,
+    getDashboardStats,
+    renderDashboard
+} = require('../controllers/reportController');
+
+const router = express.Router();
+
+router.get(
+    '/dashboard',
+    requireAuth,
+    requireRole('admin'),
+    renderDashboard
+);
+
+router.get(
+    '/reports/sales',
+    requireAuth,
+    requireRole('admin'),
+    getSalesReport
+);
+
+router.get(
+    '/reports/stats',
+    requireAuth,
+    requireRole('admin'),
+    getDashboardStats
+);
+
+module.exports = router;
+--- adminUsers.js ---
+const express = require('express');
+const mongoose = require('mongoose');
+const User = require('../models/User');
+const {
+    requireAuth,
+    requireRole
+} = require('../middleware/auth');
+
+const router = express.Router();
+
+router.put(
+    '/admin/users/:id/status',
+    requireAuth,
+    requireRole('admin'),
+    async function (req, res) {
+        try {
+            const { id } = req.params;
+            const { active } = req.body;
+
+            if (!mongoose.Types.ObjectId.isValid(id)) {
+                return res.status(400).json({
+                    error: 'Invalid user ID'
+                });
+            }
+
+            if (typeof active !== 'boolean') {
+                return res.status(400).json({
+                    error: 'The active field must be true or false'
+                });
+            }
+
+            const user = await User.findById(id);
+
+            if (!user) {
+                return res.status(404).json({
+                    error: 'User not found'
+                });
+            }
+
+            if (user.role !== 'customer') {
+                return res.status(403).json({
+                    error: 'Only customer accounts can be enabled or disabled'
+                });
+            }
+
+            user.active = active;
+            await user.save();
+
+            return res.status(200).json({
+                message: active
+                    ? 'Customer account enabled successfully'
+                    : 'Customer account disabled successfully',
+                user: {
+                    id: user._id,
+                    name: user.name,
+                    email: user.email,
+                    role: user.role,
+                    active: user.active
+                }
+            });
+        } catch (err) {
+            console.error(err);
+
+            return res.status(500).json({
+                error: 'Server error'
+            });
+        }
+    }
+);
+
+module.exports = router;
+--- auth.js ---
+const express = require('express');
+const {
+    register,
+    login
+} = require('../controllers/authController');
+
+const router = express.Router();
+
+router.get('/login', function (req, res) {
+    res.render('login');
+});
+
+router.get('/register', function (req, res) {
+    res.render('register');
+});
+
+router.post('/register', register);
+router.post('/login', login);
+
+module.exports = router;
+--- menu.js ---
+const express = require('express');
+const router = express.Router();
+const menuController = require('../controllers/menuController');
+const { requireAuth, requireRole } = require('../middleware/auth');
+
+// Public routes (no authentication needed)
+router.get('/', menuController.getAllMenuItems);
+router.get('/:id', menuController.getMenuItemById);
+
+// Admin routes (protected)
+router.post('/admin/menu-items', requireAuth, requireRole('admin'), menuController.createMenuItem);
+router.put('/admin/menu-items/:id', requireAuth, requireRole('admin'), menuController.updateMenuItem);
+router.delete('/admin/menu-items/:id', requireAuth, requireRole('admin'), menuController.deleteMenuItem);
+
+module.exports = router;
+--- orderHistory.js ---
+const express = require('express');
+const router = express.Router();
+const orderHistoryController = require('../controllers/orderHistoryController');
+const { requireAuth } = require('../middleware/auth');
+
+// Protect these routes with authentication
+router.get('/orders', requireAuth, orderHistoryController.getOrdersJson);
+router.get('/order-history', requireAuth, orderHistoryController.renderOrderHistoryPage);
+
+module.exports = router;
+--- orders.js ---
+const express = require('express');
+const router = express.Router();
+const orderController = require('../controllers/orderController');
+const { requireAuth } = require('../middleware/auth');
+
+router.post('/', requireAuth, orderController.createOrder);
+router.get('/:id/track', orderController.renderOrderTrackingPage);
+router.get('/:id/status', orderController.getOrderStatus);
+router.get('/:id', requireAuth, orderController.getOrderById);  // Éo. Added requireAuth
+
+module.exports = router;
+--- reviews.js ---
+const express = require('express');
+const router = express.Router();
+const reviewController = require('../controllers/reviewController');
+const {
+    requireAuth,
+    requireRole
+} = require('../middleware/auth');
+
+router.post(
+    '/menu/:id/reviews',
+    requireAuth,
+    requireRole('customer'),
+    reviewController.createReview
+);
+
+router.get(
+    '/menu/:id/reviews',
+    reviewController.getReviewsForItem
+);
+
+router.put(
+    '/reviews/:id',
+    requireAuth,
+    reviewController.updateReview
+);
+
+router.delete(
+    '/reviews/:id',
+    requireAuth,
+    reviewController.deleteReview
+);
+
+router.delete(
+    '/admin/reviews/:id',
+    requireAuth,
+    requireRole('admin'),
+    reviewController.adminDeleteReview
+);
+
+module.exports = router;
+--- seed.js ---
+require('dotenv').config();
+const mongoose = require('mongoose');
+const fs = require('fs');
+const path = require('path');
+const bcrypt = require('bcryptjs');
+const MenuItem = require('../models/MenuItem');
+const User = require('../models/User');
+
+async function seed() {
+    try {
+        await mongoose.connect(process.env.MONGO_URL);
+        console.log('Éo. Connected to MongoDB for seeding...');
+
+        // ---- Seed Menu Items ----
+        const rawData = fs.readFileSync(path.join(__dirname, '../data/menu.json'));
+        const menuItems = JSON.parse(rawData);
+
+        // Fix image paths: /public/images/ É+' /images/
+        const fixedItems = menuItems.map(item => ({
+            ...item,
+            imageUrl: item.imageUrl ? item.imageUrl.replace('/public/images/', '/images/') : ''
+        }));
+
+        await MenuItem.deleteMany({});
+        await MenuItem.insertMany(fixedItems);
+        console.log(`Éo. Seeded ${fixedItems.length} menu items`);
+
+        // ---- Seed Demo Users ----
+        // Clear existing users (optional É?" only if you want clean state)
+        await User.deleteMany({});
+
+        // Admin user
+        const adminPassword = await bcrypt.hash('password', 8);
+        await User.create({
+            name: 'Admin User',
+            email: 'admin@foodiehub.com',
+            password: adminPassword,
+            role: 'admin',
+            active: true
+        });
+        console.log('Éo. Created admin user: admin@foodiehub.com / password');
+
+        // Customer user
+        const customerPassword = await bcrypt.hash('password', 8);
+        await User.create({
+            name: 'Test Customer',
+            email: 'customer@foodiehub.com',
+            password: customerPassword,
+            role: 'customer',
+            active: true
+        });
+        console.log('Éo. Created customer user: customer@foodiehub.com / password');
+
+        await mongoose.disconnect();
+        console.log('Éo. Seeding complete!');
+    } catch (err) {
+        console.error('É?O Seeding failed:', err);
+        process.exit(1);
+    }
+}
+
+seed();
+--- admin-dashboard.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub É?" Admin Dashboard</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub Admin</div>
+            <ul class="nav-links">
+                <li><a href="/admin/dashboard">Dashboard</a></li>
+                <li><a href="/admin/orders">Manage Orders</a></li>
+                <li><a href="/admin-menu-manage">Manage Menu</a></li>
+                <li><a href="/">View Site</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <h1>Admin Dashboard</h1>
+        <section id="stats">
+            <div class="stat-card">
+                <h3>Total Orders</h3>
+                <span id="total-orders">
+                    <%= stats.totalOrders %>
+                </span>
+            </div>
+            <div class="stat-card">
+                <h3>Revenue</h3>
+                <span id="total-revenue">$<%= stats.revenue.toFixed(2) %></span>
+            </div>
+            <div class="stat-card">
+                <h3>Pending Orders</h3>
+                <span id="pending-orders">
+                    <%= stats.pendingOrders %>
+                </span>
+            </div>
+        </section>
+
+        <section>
+            <h2>Recent Orders</h2>
+            <table id="admin-orders-table">
+                <thead>
+                    <tr>
+                        <th>Order ID</th>
+                        <th>Customer</th>
+                        <th>Items</th>
+                        <th>Total</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <% if (recentOrders.length===0) { %>
+                        <tr>
+                            <td colspan="6">No recent orders.</td>
+                        </tr>
+                        <% } else { %>
+                            <% recentOrders.forEach(order=> { %>
+                                <tr>
+                                    <td>
+                                        <%= order._id %>
+                                    </td>
+                                    <td>
+                                        <%= order.customerId ? order.customerId.name : 'Unknown customer' %>
+                                    </td>
+                                    <td>
+                                        <%= order.items.reduce((sum, item)=> sum + (item.quantity || 0), 0) %>
+                                    </td>
+                                    <td>$<%= (order.total || 0).toFixed(2) %>
+                                    </td>
+                                    <td>
+                                        <%= order.status %>
+                                    </td>
+                                    <td><a href="/admin/orders">View</a></td>
+                                </tr>
+                                <% }) %>
+                                    <% } %>
+                </tbody>
+            </table>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 FoodieHub Admin</p>
+    </footer>
+
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+</body>
+
+</html>
+--- admin-menu-manage.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub É?" Manage Menu</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub Admin</div>
+            <ul class="nav-links">
+                <li><a href="/admin/dashboard">Dashboard</a></li>
+                <li><a href="/admin/orders">Manage Orders</a></li>
+                <li><a href="/admin-menu-manage">Manage Menu</a></li>
+                <li><a href="/">View Site</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <h1>Manage Menu Items</h1>
+
+        <section>
+            <h2>Add New Item</h2>
+            <form id="add-item-form" onsubmit="return submitNewItem(event)">
+                <label for="item-name">Name:</label>
+                <input type="text" id="item-name" placeholder="e.g., Pepperoni Pizza" required>
+                <span id="item-name-error" class="error-message"></span>
+
+                <label for="item-description">Description:</label>
+                <textarea id="item-description" placeholder="Describe the item" required></textarea>
+                <span id="item-description-error" class="error-message"></span>
+
+                <label for="item-price">Price ($):</label>
+                <input type="number" id="item-price" step="0.01" placeholder="9.99" required>
+                <span id="item-price-error" class="error-message"></span>
+
+                <label for="item-stock">Stock:</label>
+                <input type="number" id="item-stock" placeholder="50" required>
+                <span id="item-stock-error" class="error-message"></span>
+
+                <label for="item-category">Category:</label>
+                <select id="item-category">
+                    <option value="Pizza">Pizza</option>
+                    <option value="Burgers">Burgers</option>
+                    <option value="Salads">Salads</option>
+                    <option value="Drinks">Drinks</option>
+                    <option value="Desserts">Desserts</option>
+                </select>
+
+                <button type="submit">Add Item</button>
+            </form>
+        </section>
+
+        <section>
+            <h2>Current Menu</h2>
+            <table id="admin-menu-table">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Category</th>
+                        <th>Price</th>
+                        <th>Available</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- admin.js populates this -->
+                </tbody>
+            </table>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 FoodieHub Admin</p>
+    </footer>
+
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+</body>
+
+</html>
+--- admin-orders.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub É?" Manage Orders</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub Admin</div>
+            <ul class="nav-links">
+                <li><a href="/admin/dashboard">Dashboard</a></li>
+                <li><a href="/admin/orders">Manage Orders</a></li>
+                <li><a href="/admin-menu-manage">Manage Menu</a></li>
+                <li><a href="/">View Site</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <h1>All Orders</h1>
+        <table id="admin-orders-table">
+            <thead>
+                <tr>
+                    <th>Order ID</th>
+                    <th>Customer</th>
+                    <th>Items</th>
+                    <th>Total</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                <% if (orders.length===0) { %>
+                    <tr>
+                        <td colspan="6">No orders found.</td>
+                    </tr>
+                    <% } else { %>
+                        <% orders.forEach(order=> { %>
+                            <tr>
+                                <td>
+                                    <%= order._id %>
+                                </td>
+                                <td>
+                                    <%= order.customerId ? order.customerId.name : 'Unknown customer' %>
+                                </td>
+                                <td>
+                                    <%= order.items.reduce((sum, item)=> sum + (item.quantity || 0), 0) %>
+                                </td>
+                                <td>$<%= (order.total || 0).toFixed(2) %>
+                                </td>
+                                <td>
+                                    <%= order.status %>
+                                </td>
+                                <td>
+                                    <% if (order.status==='Delivered' ) { %>
+                                        <button class="action-btn" disabled>Delivered</button>
+                                        <% } else { %>
+                                            <button class="action-btn update-status"
+                                                onclick="updateOrderStatus('<%= order._id %>')">Update Status</button>
+                                            <% } %>
+                                </td>
+                            </tr>
+                            <% }) %>
+                                <% } %>
+            </tbody>
+        </table>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 FoodieHub Admin</p>
+    </footer>
+
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+</body>
+
+</html>
+--- cart.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub - Cart</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li class="admin-only"><a href="/admin">Dashboard</a></li>
+                <li class="admin-only"><a href="/admin/menu">Manage Menu</a></li>
+                <li id="nav-login-item"><a href="/login">Login</a></li>
+                <li id="nav-register-item"><a href="/register">Register</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main>
+        <div class="cart-heading">
+            <h1>Your Cart</h1>
+            <a href="/" class="continue-shopping">&larr; Continue Shopping</a>
+        </div>
+        <div class="cart-layout">
+            <div class="cart-main">
+                <section id="cart-items">
+                    <!-- cart.js populates this -->
+                </section>
+                <div class="empty-cart-cta">
+                    <a href="/" class="browse-menu-btn">Browse the Menu &rarr;</a>
+                </div>
+                <div id="cart-total">Total: $0.00</div>
+            </div>
+
+            <div class="cart-checkout">
+                <div class="order-summary">
+                    <h3>Order Summary</h3>
+                    <p class="summary-hint">Review your items, then continue to enter your delivery details and payment.</p>
+                    <button type="button" class="proceed-btn" onclick="proceedToCheckout()">Proceed to Checkout &rarr;</button>
+                </div>
+            </div>
+        </div>
+    </main>
+    <footer>
+        <p>&copy; 2026 FoodieHub. All rights reserved.</p>
+    </footer>
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+    <script src="/js/auth-status.js"></script>
+    <script>
+        function proceedToCheckout() {
+            if (typeof cart === 'undefined' || cart.length === 0) {
+                alert('Your cart is empty.');
+                return;
+            }
+            window.location.href = '/checkout';
+        }
+    </script>
+</body>
+</html>
+--- checkout.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub - Checkout</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li id="nav-login-item"><a href="/login">Login</a></li>
+                <li id="nav-register-item"><a href="/register">Register</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main>
+        <h1>Checkout</h1>
+        <form id="checkout-form" onsubmit="return submitOrder(event)">
+            <label for="delivery-address">Delivery Address</label>
+            <input type="text" id="delivery-address" name="deliveryAddress" required>
+            <span id="delivery-address-error" class="error-message"></span>
+
+            <label for="schedule-time">Schedule for (optional)</label>
+            <input type="datetime-local" id="schedule-time" name="scheduledFor">
+            <span id="schedule-time-error" class="error-message"></span>
+
+            <p>Your cart total: <span id="cart-total-display">$0.00</span></p>
+            <span id="cart-error" class="error-message"></span>
+
+            <button type="submit">Place Order</button>
+        </form>
+        <a href="/cart">É+? Back to Cart</a>
+    </main>
+    <footer>
+        <p>&copy; 2026 FoodieHub. Built with Hunger and Passion.</p>
+    </footer>
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/fetch.js"></script>
+    <script>
+        // Display cart total on load
+        document.addEventListener('DOMContentLoaded', function () {
+            const totalEl = document.getElementById('cart-total-display');
+            if (typeof cart !== 'undefined' && cart.length > 0) {
+                const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+                totalEl.textContent = '$' + total.toFixed(2);
+            } else {
+                totalEl.textContent = '$0.00';
+            }
+        });
+
+        // Submit order via AJAX
+        async function submitOrder(e) {
+            e.preventDefault();
+
+            // Validate address
+            const address = document.getElementById('delivery-address').value.trim();
+            if (!address) {
+                document.getElementById('delivery-address-error').textContent = 'Delivery address is required.';
+                return false;
+            }
+
+            // Check cart
+            if (typeof cart === 'undefined' || cart.length === 0) {
+                document.getElementById('cart-error').textContent = 'Your cart is empty.';
+                return false;
+            }
+
+            // Build order items from cart
+            const items = cart.map(item => ({
+                menuItemId: item.menuItemId,
+                quantity: item.quantity,
+                customizations: item.customizations || ''
+            }));
+
+            const scheduledFor = document.getElementById('schedule-time').value || null;
+
+            try {
+                const response = await fetch('/orders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ items, scheduledFor })
+                });
+
+                if (!response.ok) {
+                    const data = await response.json();
+                    alert(data.error || 'Order failed');
+                    return;
+                }
+
+                const order = await response.json();
+                // Clear cart and save the cleared state
+                cart = [];
+                saveCart();          // <-- This is the line we added for Step 2
+                updateCartUI();
+                // Redirect to tracking
+                window.location.href = `/orders/${order._id}/track`;
+            } catch (err) {
+                console.error(err);
+                alert('Could not place order. Please try again.');
+            }
+        }
+    </script>
+</body>
+
+</html>
+--- index.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub É?" Menu</title>
+    <link rel="stylesheet" href="/css/styles.css">
+    <script src="/js/fetch.js"></script>
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li><a href="/login">Login</a></li>
+                <li><a href="/admin/dashboard">Admin</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section class="hero">
+            <h1>Dive In To The Menu that fulfills your cravings</h1>
+        </section>
+
+        <section class="filters">
+            <div class="filter-group">
+                <label for="category-filter">Category</label>
+                <select id="category-filter">
+                    <option value="all">All</option>
+                    <option value="Burgers">Burgers</option>
+                    <option value="Desserts">Desserts</option>
+                    <option value="Drinks">Drinks</option>
+                    <option value="Pasta">Pasta</option>
+                    <option value="Pizza">Pizza</option>
+                    <option value="Salads">Salads</option>
+                </select>
+            </div>
+
+            <div class="filter-group price-group">
+                <label for="price-filter">Max Price</label>
+                <input type="range" id="price-filter" min="0" max="50" value="50">
+                <span id="price-filter-value">$50</span>
+            </div>
+
+            <div class="filter-group">
+                <label for="diet-filter">Dietary</label>
+                <select id="diet-filter">
+                    <option value="all">All</option>
+                    <option value="vegetarian">Vegetarian</option>
+                    <option value="vegan">Vegan</option>
+                    <option value="gluten-free">Gluten-Free</option>
+                </select>
+            </div>
+        </section>
+
+        <section id="menu-grid">
+            <!-- menu.js + fetch.js populate this -->
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 FoodieHub. Built with Hunger and Passion.</p>
+    </footer>
+
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+</body>
+
+</html>
+--- item.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub É?" Item Detail</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li><a href="/login">Login</a></li>
+                <li><a href="/admin/dashboard">Admin</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section id="item-detail" class="item-detail-container">
+            <a href="/" class="back-link">&larr; Back to Menu</a>
+            <div class="item-card">
+                <div id="item-image-container">
+                    <img id="item-image" class="item-image" src="" alt="">
+                </div>
+                <div class="item-body">
+                    <h1 id="item-name" class="item-name"></h1>
+                    <p id="item-description" class="item-description"></p>
+                    <p id="item-price" class="item-price"></p>
+
+                    <label for="item-customizations">Customizations</label>
+                    <textarea id="item-customizations" placeholder="e.g. extra cheese, no onions"></textarea>
+
+                    <label for="item-quantity">Quantity</label>
+                    <input type="number" id="item-quantity" value="1" min="1">
+
+                    <button id="add-to-cart-btn" class="add-to-cart-btn">Add to Cart</button>
+                </div>
+            </div>
+            <section id="reviews-section" class="reviews-section">
+                <h2>Reviews</h2>
+
+                <form id="review-form">
+                    <label for="review-rating">Rating (1-5)</label>
+                    <input type="number" id="review-rating" min="1" max="5" required>
+
+                    <label for="review-comment">Comment</label>
+                    <textarea id="review-comment" required></textarea>
+
+                    <button type="submit">Submit Review</button>
+                </form>
+
+                <div id="reviews-list">
+                    <!-- reviews.js will fill this in -->
+                </div>
+            </section>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 FoodieHub. Built with Hunger and Passion.</p>
+    </footer>
+
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+    <script src="/js/reviews.js"></script>
+</body>
+
+</html>
+--- login.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub É?" Login</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li><a href="/login">Login</a></li>
+                <li><a href="/admin">Admin</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section>
+            <h1>Login</h1>
+            <h1>Login</h1>
+            <% if (locals.error) { %>
+                <div class="error-message"
+                    style="color:#ef5a5a; background:#ffe8e8; padding:10px; border-radius:4px; margin-bottom:15px;">
+                    <%= error %>
+                </div>
+                <% } %>
+                    <form id="login-form" ...>
+                        ...
+                        <form id="login-form" action="/login" method="POST" onsubmit="return validateLogin()">
+                            <label for="login-email">Email:</label>
+                            <input type="email" id="login-email" name="email" placeholder="you@example.com" required>
+                            <span id="login-email-error" class="error-message"></span>
+
+                            <label for="login-password">Password:</label>
+                            <input type="password" id="login-password" name="password" placeholder="Enter password"
+                                minlength="6" required>
+                            <span id="login-password-error" class="error-message"></span>
+
+                            <button type="submit">Login</button>
+                        </form>
+                        <p>Don't have an account? <a href="/register">Register here</a></p>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 FoodieHub. Built with Hunger and Passion.</p>
+    </footer>
+
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+</body>
+
+</html>
+--- order-history.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub - Order History</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul>
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart (<span id="cart-badge">0</span>)</a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li class="admin-only"><a href="/admin/dashboard">Dashboard</a></li>
+                <li class="admin-only"><a href="/admin-menu-manage">Manage Menu</a></li>
+                <li><a href="/login">Login</a></li>
+                <li><a href="/register">Register</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main>
+        <h1>Order History</h1>
+        <section id="order-history-list">
+            <% if (orders.length===0) { %>
+                <p>You have no past orders yet.</p>
+                <% } else { %>
+                    <% orders.forEach(function(order) { %>
+                        <div class="order-card" data-order-id="<%= order._id %>">
+                            <p class="order-date">
+                                <%= new Date(order.createdAt).toLocaleString() %>
+                            </p>
+                            <p class="order-status">Status: <%= order.status %>
+                            </p>
+                            <ul class="order-items">
+                                <% order.items.forEach(function(item) { %>
+                                    <li>
+                                        <%= item.quantity %> x
+                                            <%= item.menuItem && item.menuItem.name ? item.menuItem.name : 'Item' %>
+                                                <% if (item.customizations) { %>(<%= item.customizations %>)<% } %>
+                                    </li>
+                                    <% }); %>
+                            </ul>
+                            <p class="order-total">Total: $<%= order.total %>
+                            </p>
+                            <button class="reorder-btn" data-order-id="<%= order._id %>">Reorder</button>
+                        </div>
+                        <% }); %>
+                            <% } %>
+        </section>
+    </main>
+    <footer>
+        <p>&copy; 2026 FoodieHub. All rights reserved.</p>
+    </footer>
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+</body>
+
+</html>
+--- order-tracking.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub - Track Order</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li class="admin-only"><a href="/admin">Dashboard</a></li>
+                <li class="admin-only"><a href="/admin/menu">Manage Menu</a></li>
+                <li id="nav-login-item"><a href="/login">Login</a></li>
+                <li id="nav-register-item"><a href="/register">Register</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main>
+        <section id="tracking-container">
+            <h1>Order #<span id="order-id"><%= orderId %></span></h1>
+
+            <div id="status-stepper">
+                <div class="step active" data-step="0">Placed</div>
+                <div class="step" data-step="1">Preparing</div>
+                <div class="step" data-step="2">Out for Delivery</div>
+                <div class="step" data-step="3">Delivered</div>
+            </div>
+
+            <div id="current-status">
+                <p>Current Status: <strong id="status-text">Placed</strong></p>
+            </div>
+
+            <button onclick="window.location.href='/'" class="back-link">&larr; Back to Menu</button>
+        </section>
+    </main>
+    <footer>
+        <p>&copy; 2026 FoodieHub. All rights reserved.</p>
+    </footer>
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+    <script src="/js/auth-status.js"></script>
+</body>
+</html>
+--- register.ejs ---
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub É?" Register</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li>
+                    <a href="/cart">
+                        Cart <span id="cart-badge">0</span>
+                    </a>
+                </li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li><a href="/login">Login</a></li>
+                <li><a href="/admin">Admin</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section>
+            <h1>Create Account</h1>
+            <% if (locals.error) { %>
+                <div class="error-message"
+                    style="color:#ef5a5a; background:#ffe8e8; padding:10px; border-radius:4px; margin-bottom:15px;">
+                    <%= error %>
+                </div>
+                <% } %>
+                    <form id="register-form" action="/register" method="POST" onsubmit="return validateRegister()">
+                        <label for="register-name">Full Name:</label>
+                        <input type="text" id="register-name" name="name" placeholder="John Doe" required>
+                        <span id="register-name-error" class="error-message"></span>
+
+                        <label for="register-email">Email:</label>
+                        <input type="email" id="register-email" name="email" placeholder="you@example.com" required>
+                        <span id="register-email-error" class="error-message"></span>
+
+                        <label for="register-password">
+                            Password (min 6 chars):
+                        </label>
+                        <input type="password" id="register-password" name="password" placeholder="Min 6 characters"
+                            minlength="6" required>
+                        <span id="register-password-error" class="error-message"></span>
+
+                        <button type="submit">Register</button>
+                    </form>
+
+                    <p>
+                        Already have an account?
+                        <a href="/login">Login here</a>
+                    </p>
+        </section>
+    </main>
+
+    <footer>
+        <p>
+            &copy; 2026 FoodieHub. Built with Hunger and Passion.
+        </p>
+    </footer>
+
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+</body>
+
+</html>
+--- .env ---
+MONGO_URL=mongodb://localhost:27017/foodiehub 
+JWT_SECRET=your-super-secret-jwt-key-change-this 
+PORT=3000 
+--- app.js ---
+require('dotenv').config();
+const express = require('express');
+const mongoose = require('mongoose');
+const cookieParser = require('cookie-parser');
+const { getCurrentUser } = require('./middleware/auth');
+
+const app = express();
+
+// ---- View engine ----
+app.set('view engine', 'ejs');
+app.set('views', './views');
+
+// ---- Core middleware ----
+app.use(express.static('public'));
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(cookieParser());
+app.use(getCurrentUser); // Populate req.user if token exists (for /me)
+
+// ---- DB connection ----
+mongoose.connect(process.env.MONGO_URL)
+    .then(() => console.log('MongoDB connected'))
+    .catch(err => console.error('MongoDB connection error:', err));
+
+// ---- API Routes ----
+app.get('/', (req, res) => {
+    res.render('index');
+});
+app.use('/menu', require('./routes/menu'));           // Track 1
+app.use('/orders', require('./routes/orders'));       // Track 2
+app.use('/', require('./routes/auth'));               // Track 3
+app.use('/', require('./routes/adminUsers'));         // Track 3
+app.use('/admin', require('./routes/adminOrders'));   // Track 4
+app.use('/admin', require('./routes/adminReports'));  // Track 4
+app.use('/', require('./routes/reviews'));            // Track 5
+app.use('/', require('./routes/orderHistory'));       // Track 5
+
+// ---- Views that are rendered as pages (clientÉ?`side data fetching) ----
+app.get('/item', (req, res) => res.render('item'));
+app.get('/cart', (req, res) => res.render('cart'));
+app.get('/admin-menu-manage', (req, res) => res.render('admin-menu-manage'));
+app.get('/checkout', (req, res) => res.render('checkout'));
+
+// ---- Redirect /admin to dashboard ----
+app.get('/admin', (req, res) => res.redirect('/admin/dashboard'));
+
+// ---- Get current user role (for admin nav visibility) ----
+app.get('/me', (req, res) => res.json({ role: req.user?.role || null }));
+
+// ---- Centralized error handler (MUST BE LAST) ----
+app.use((err, req, res, next) => {
+    console.error(err.stack);
+    res.status(500).json({ error: 'Something went wrong!' });
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server running on port ${port}`));
+--- CONTRACT.md ---
+FoodieHub - Data Contract 
+
+dYs" READ THIS BEFORE YOU WRITE ANY CODE
+
+This document is the !! single source of truth !! for all data shapes in the FoodieHub project. Every HTML page, every JavaScript function, and every JSON file must use these exact field names. If you invent your own field names, the project will break.
+
+dY"› Menu Item Object
+
+js
+{
+    "id": "m1",                     // string (unique identifier)
+
+    "name": "Margherita Pizza",      // string
+
+    "description": "Classic tomato sauce with fresh mozzarella and basil.",  // string
+
+    "price": 12.99,                  // number (price in dollars)
+
+    "category": "Pizza",             // string: "Pizza" | "Burgers" | 
+    
+    "Salads" | "Drinks" | "Desserts" | "Pasta"
+
+    "dietaryTags": ["vegetarian"],   // array of strings: "vegetarian" | 
+    
+    "vegan" | "gluten-free"
+
+    "imageUrl": "images/pizza.jpg",  // string (path to image)
+
+    "available": true                // boolean (true = in stock, false = sold out)
+
+}
+{
+    "cartItemId": "c1",             // string (unique cart item ID)
+    "menuItemId": "m1",             // string (references the menu item)
+    "name": "Margherita Pizza",      // string (copy from menu item)
+    "price": 8.99,                  // number (copy from menu item)
+    "quantity": 2,                  // number (how many of this item)
+    "customizations": "extra cheese, no basil"  // string (plain text)
+}
+{
+    "id": "u1",                     // string (unique user ID)
+    "name": "Test Customer",        // string
+    "email": "test@foodiehub.com",  // string
+    "role": "customer"              // string: "customer" | "admin"
+}
+{
+    "id": "o1",                     // string (unique order ID)
+    "customerId": "u1",             // string (references the user)
+    "items": [                      // array of cart items
+        {
+            "menuItemId": "m1",
+            "name": "Margherita Pizza",
+            "price": 8.99,
+            "quantity": 2,
+            "customizations": "extra cheese"
+        }
+    ],
+    "status": "Placed",             // string: "Placed" | "Preparing" | "Out for Delivery" | "Delivered"
+    "scheduledFor": null,           // null OR ISO datetime string (e.g., "2026-07-25T14:30:00")
+    "total": 17.98,                 // number (sum of all item subtotals)
+    "placedAt": "2026-07-24T10:00:00" // ISO datetime string
+}
+
+dY+" Shared Container IDs (HTML + JS)
+ID	Found on Page	Used By (JS)
+#menu-grid	index.html	menu.js
+#category-filter	index.html	menu.js
+#price-filter	index.html	menu.js
+#diet-filter	index.html	menu.js
+#cart-items	cart.html	cart.js
+#cart-total	cart.html	cart.js
+#cart-badge	every page	cart.js
+#schedule-time	cart.html	validation.js
+#status-stepper	order-tracking.html	admin.js
+#status-text	order-tracking.html	admin.js
+#login-form	login.html	validation.js
+#register-form	register.html	validation.js
+#admin-orders-table	admin-orders.html	admin.js
+#admin-menu-table	admin-menu-manage.html	admin.js
+.admin-only	every page (class)	admin.js
+#order-history-list	order-history.html	cart.js
+
+dY"? Folder Structure
+
+FoodieHub/
+É"oÉ"?É"? index.html
+É"oÉ"?É"? item.html
+É"oÉ"?É"? cart.html
+É"oÉ"?É"? order-tracking.html
+É"oÉ"?É"? login.html
+É"oÉ"?É"? register.html
+É"oÉ"?É"? admin-dashboard.html
+É"oÉ"?É"? admin-orders.html
+É"oÉ"?É"? admin-menu-manage.html
+É"oÉ"?É"? order-history.html
+É"oÉ"?É"? CONTRACT.md          É+? YOU ARE HERE
+É"oÉ"?É"? README.md
+É"oÉ"?É"? css/
+É",   É""É"?É"? styles.css
+É"oÉ"?É"? js/
+É",   É"oÉ"?É"? menu.js          É+? Omar (Leader)
+É",   É"oÉ"?É"? cart.js          É+? Omar Hassan
+É",   É"oÉ"?É"? validation.js    É+? Marwan
+É",   É"oÉ"?É"? admin.js         É+? Mazen
+É",   É""É"?É"? fetch.js         É+? Yassin
+É""É"?É"? data/
+    É""É"?É"? menu.json
+
+    dYs" Golden Rules
+Never hardcode data in HTML É?" all dynamic content goes in empty containers.
+
+Use exact field names from this contract É?" no itemName, it's name.
+
+All IDs must match É?" if HTML uses #menu-grid, JS must use #menu-grid.
+
+If you need a new field, ping the group first É?" don't invent silently.
+
+
+
+--- package-lock.json ---
+{
+  "name": "foodiehub-latest",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "foodiehub-latest",
+      "version": "1.0.0",
+      "license": "ISC",
+      "dependencies": {
+        "bcryptjs": "^3.0.3",
+        "cookie-parser": "^1.4.7",
+        "dotenv": "^17.4.2",
+        "ejs": "^6.0.1",
+        "express": "^5.2.1",
+        "jsonwebtoken": "^9.0.3",
+        "mongoose": "^9.9.1",
+        "multer": "^2.2.0"
+      },
+      "devDependencies": {
+        "nodemon": "^3.1.14"
+      }
+    },
+    "node_modules/@mongodb-js/saslprep": {
+      "version": "1.4.13",
+      "resolved": "https://registry.npmjs.org/@mongodb-js/saslprep/-/saslprep-1.4.13.tgz",
+      "integrity": "sha512-E3Sv4eCYAlKYUTx8S3ioQcDUscOif+8zZ5OnW1IzJ+Tt+EO+ke8mn+Y3FX6N1H79picwbdOavVOb1jPi2EOyrg==",
+      "license": "MIT",
+      "dependencies": {
+        "sparse-bitfield": "^3.0.3"
+      }
+    },
+    "node_modules/@standard-schema/spec": {
+      "version": "1.1.0",
+      "resolved": "https://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz",
+      "integrity": "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==",
+      "license": "MIT"
+    },
+    "node_modules/@types/webidl-conversions": {
+      "version": "7.0.3",
+      "resolved": "https://registry.npmjs.org/@types/webidl-conversions/-/webidl-conversions-7.0.3.tgz",
+      "integrity": "sha512-CiJJvcRtIgzadHCYXw7dqEnMNRjhGZlYK05Mj9OyktqV8uVT8fD2BFOB7S1uwBE3Kj2Z+4UyPmFw/Ixgw/LAlA==",
+      "license": "MIT"
+    },
+    "node_modules/@types/whatwg-url": {
+      "version": "13.0.0",
+      "resolved": "https://registry.npmjs.org/@types/whatwg-url/-/whatwg-url-13.0.0.tgz",
+      "integrity": "sha512-N8WXpbE6Wgri7KUSvrmQcqrMllKZ9uxkYWMt+mCSGwNc0Hsw9VQTW7ApqI4XNrx6/SaM2QQJCzMPDEXE058s+Q==",
+      "license": "MIT",
+      "dependencies": {
+        "@types/webidl-conversions": "*"
+      }
+    },
+    "node_modules/accepts": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/accepts/-/accepts-2.0.0.tgz",
+      "integrity": "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==",
+      "license": "MIT",
+      "dependencies": {
+        "mime-types": "^3.0.0",
+        "negotiator": "^1.0.0"
+      },
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/anymatch": {
+      "version": "3.1.3",
+      "resolved": "https://registry.npmjs.org/anymatch/-/anymatch-3.1.3.tgz",
+      "integrity": "sha512-KMReFUr0B4t+D+OBkjR3KYqvocp2XaSzO55UcB6mgQMd3KbcE+mWTyvVV7D/zsdEbNnV6acZUutkiHQXvTr1Rw==",
+      "dev": true,
+      "license": "ISC",
+      "dependencies": {
+        "normalize-path": "^3.0.0",
+        "picomatch": "^2.0.4"
+      },
+      "engines": {
+        "node": ">= 8"
+      }
+    },
+    "node_modules/append-field": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/append-field/-/append-field-1.0.0.tgz",
+      "integrity": "sha512-klpgFSWLW1ZEs8svjfb7g4qWY0YS5imI82dTg+QahUvJ8YqAY0P10Uk8tTyh9ZGuYEZEMaeJYCF5BFuX552hsw==",
+      "license": "MIT"
+    },
+    "node_modules/balanced-match": {
+      "version": "4.0.4",
+      "resolved": "https://registry.npmjs.org/balanced-match/-/balanced-match-4.0.4.tgz",
+      "integrity": "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": "18 || 20 || >=22"
+      }
+    },
+    "node_modules/bcryptjs": {
+      "version": "3.0.3",
+      "resolved": "https://registry.npmjs.org/bcryptjs/-/bcryptjs-3.0.3.tgz",
+      "integrity": "sha512-GlF5wPWnSa/X5LKM1o0wz0suXIINz1iHRLvTS+sLyi7XPbe5ycmYI3DlZqVGZZtDgl4DmasFg7gOB3JYbphV5g==",
+      "license": "BSD-3-Clause",
+      "bin": {
+        "bcrypt": "bin/bcrypt"
+      }
+    },
+    "node_modules/binary-extensions": {
+      "version": "2.3.0",
+      "resolved": "https://registry.npmjs.org/binary-extensions/-/binary-extensions-2.3.0.tgz",
+      "integrity": "sha512-Ceh+7ox5qe7LJuLHoY0feh3pHuUDHAcRUeyL2VYghZwfpkNIy/+8Ocg0a3UuSoYzavmylwuLWQOf3hl0jjMMIw==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=8"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/sindresorhus"
+      }
+    },
+    "node_modules/body-parser": {
+      "version": "2.3.0",
+      "resolved": "https://registry.npmjs.org/body-parser/-/body-parser-2.3.0.tgz",
+      "integrity": "sha512-2cGmJupaNgg+QUwVLAucDuWuoMZ6EX9iHDRswZ5lsNYEmwPaRknMPCLZz07yTzVq/83p4o/wzbDZbBrTvGGTIw==",
+      "license": "MIT",
+      "dependencies": {
+        "bytes": "^3.1.2",
+        "content-type": "^2.0.0",
+        "debug": "^4.4.3",
+        "http-errors": "^2.0.1",
+        "iconv-lite": "^0.7.2",
+        "on-finished": "^2.4.1",
+        "qs": "^6.15.2",
+        "raw-body": "^3.0.2",
+        "type-is": "^2.1.0"
+      },
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/body-parser/node_modules/content-type": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/content-type/-/content-type-2.0.0.tgz",
+      "integrity": "sha512-j/O/d7GcZCyNl7/hwZAb606rzqkyvaDctLmckbxLzHvFBzTJHuGEdodATcP3yIRoDrLHkIATJuvzbFlp/ki2cQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/brace-expansion": {
+      "version": "5.0.9",
+      "resolved": "https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.9.tgz",
+      "integrity": "sha512-ScQ4IuvIEF1TMlP7Zt+vjJ//9zlPb2SDcxWxM3bk8s6t6GGdJ7KO1dCcTidOPJKePW30LE/2cT7wCyPho9/Wxg==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "balanced-match": "^4.0.2"
+      },
+      "engines": {
+        "node": "20 || >=22"
+      }
+    },
+    "node_modules/braces": {
+      "version": "3.0.3",
+      "resolved": "https://registry.npmjs.org/braces/-/braces-3.0.3.tgz",
+      "integrity": "sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "fill-range": "^7.1.1"
+      },
+      "engines": {
+        "node": ">=8"
+      }
+    },
+    "node_modules/bson": {
+      "version": "7.3.1",
+      "resolved": "https://registry.npmjs.org/bson/-/bson-7.3.1.tgz",
+      "integrity": "sha512-h/C0qe6857pQhcSJHLfsR1uYGj98Ge3wKAD3Ed9KqH3wcVh+BM4Jq4xISD7vs9OPuT07n+q3QQVjslJ286j6ag==",
+      "license": "Apache-2.0",
+      "engines": {
+        "node": ">=20.19.0"
+      }
+    },
+    "node_modules/buffer-equal-constant-time": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/buffer-equal-constant-time/-/buffer-equal-constant-time-1.0.1.tgz",
+      "integrity": "sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA==",
+      "license": "BSD-3-Clause"
+    },
+    "node_modules/buffer-from": {
+      "version": "1.1.2",
+      "resolved": "https://registry.npmjs.org/buffer-from/-/buffer-from-1.1.2.tgz",
+      "integrity": "sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ==",
+      "license": "MIT"
+    },
+    "node_modules/busboy": {
+      "version": "1.6.0",
+      "resolved": "https://registry.npmjs.org/busboy/-/busboy-1.6.0.tgz",
+      "integrity": "sha512-8SFQbg/0hQ9xy3UNTB0YEnsNBbWfhf7RtnzpL7TkBiTBRfrQ9Fxcnz7VJsleJpyp6rVLvXiuORqjlHi5q+PYuA==",
+      "dependencies": {
+        "streamsearch": "^1.1.0"
+      },
+      "engines": {
+        "node": ">=10.16.0"
+      }
+    },
+    "node_modules/bytes": {
+      "version": "3.1.2",
+      "resolved": "https://registry.npmjs.org/bytes/-/bytes-3.1.2.tgz",
+      "integrity": "sha512-/Nf7TyzTx6S3yRJObOAV7956r8cr2+Oj8AC5dt8wSP3BQAoeX58NoHyCU8P8zGkNXStjTSi6fzO6F0pBdcYbEg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/call-bind-apply-helpers": {
+      "version": "1.0.2",
+      "resolved": "https://registry.npmjs.org/call-bind-apply-helpers/-/call-bind-apply-helpers-1.0.2.tgz",
+      "integrity": "sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==",
+      "license": "MIT",
+      "dependencies": {
+        "es-errors": "^1.3.0",
+        "function-bind": "^1.1.2"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      }
+    },
+    "node_modules/call-bound": {
+      "version": "1.0.4",
+      "resolved": "https://registry.npmjs.org/call-bound/-/call-bound-1.0.4.tgz",
+      "integrity": "sha512-+ys997U96po4Kx/ABpBCqhA9EuxJaQWDQg7295H4hBphv3IZg0boBKuwYpt4YXp6MZ5AmZQnU/tyMTlRpaSejg==",
+      "license": "MIT",
+      "dependencies": {
+        "call-bind-apply-helpers": "^1.0.2",
+        "get-intrinsic": "^1.3.0"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/chokidar": {
+      "version": "3.6.0",
+      "resolved": "https://registry.npmjs.org/chokidar/-/chokidar-3.6.0.tgz",
+      "integrity": "sha512-7VT13fmjotKpGipCW9JEQAusEPE+Ei8nl6/g4FBAmIm0GOOLMua9NDDo/DWp0ZAxCr3cPq5ZpBqmPAQgDda2Pw==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "anymatch": "~3.1.2",
+        "braces": "~3.0.2",
+        "glob-parent": "~5.1.2",
+        "is-binary-path": "~2.1.0",
+        "is-glob": "~4.0.1",
+        "normalize-path": "~3.0.0",
+        "readdirp": "~3.6.0"
+      },
+      "engines": {
+        "node": ">= 8.10.0"
+      },
+      "funding": {
+        "url": "https://paulmillr.com/funding/"
+      },
+      "optionalDependencies": {
+        "fsevents": "~2.3.2"
+      }
+    },
+    "node_modules/concat-stream": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/concat-stream/-/concat-stream-2.0.0.tgz",
+      "integrity": "sha512-MWufYdFw53ccGjCA+Ol7XJYpAlW6/prSMzuPOTRnJGcGzuhLn4Scrz7qf6o8bROZ514ltazcIFJZevcfbo0x7A==",
+      "engines": [
+        "node >= 6.0"
+      ],
+      "license": "MIT",
+      "dependencies": {
+        "buffer-from": "^1.0.0",
+        "inherits": "^2.0.3",
+        "readable-stream": "^3.0.2",
+        "typedarray": "^0.0.6"
+      }
+    },
+    "node_modules/content-disposition": {
+      "version": "1.1.0",
+      "resolved": "https://registry.npmjs.org/content-disposition/-/content-disposition-1.1.0.tgz",
+      "integrity": "sha512-5jRCH9Z/+DRP7rkvY83B+yGIGX96OYdJmzngqnw2SBSxqCFPd0w2km3s5iawpGX8krnwSGmF0FW5Nhr0Hfai3g==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/content-type": {
+      "version": "1.0.5",
+      "resolved": "https://registry.npmjs.org/content-type/-/content-type-1.0.5.tgz",
+      "integrity": "sha512-nTjqfcBFEipKdXCv4YDQWCfmcLZKm81ldF0pAopTvyrFGVbcR6P/VAAd5G7N+0tTr8QqiU0tFadD6FK4NtJwOA==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/cookie": {
+      "version": "0.7.2",
+      "resolved": "https://registry.npmjs.org/cookie/-/cookie-0.7.2.tgz",
+      "integrity": "sha512-yki5XnKuf750l50uGTllt6kKILY4nQ1eNIQatoXEByZ5dWgnKqbnqmTrBE5B4N7lrMJKQ2ytWMiTO2o0v6Ew/w==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/cookie-parser": {
+      "version": "1.4.7",
+      "resolved": "https://registry.npmjs.org/cookie-parser/-/cookie-parser-1.4.7.tgz",
+      "integrity": "sha512-nGUvgXnotP3BsjiLX2ypbQnWoGUPIIfHQNZkkC668ntrzGWEZVW70HDEB1qnNGMicPje6EttlIgzo51YSwNQGw==",
+      "license": "MIT",
+      "dependencies": {
+        "cookie": "0.7.2",
+        "cookie-signature": "1.0.6"
+      },
+      "engines": {
+        "node": ">= 0.8.0"
+      }
+    },
+    "node_modules/cookie-parser/node_modules/cookie-signature": {
+      "version": "1.0.6",
+      "resolved": "https://registry.npmjs.org/cookie-signature/-/cookie-signature-1.0.6.tgz",
+      "integrity": "sha512-QADzlaHc8icV8I7vbaJXJwod9HWYp8uCqf1xa4OfNu1T7JVxQIrUgOWtHdNDtPiywmFbiS12VjotIXLrKM3orQ==",
+      "license": "MIT"
+    },
+    "node_modules/cookie-signature": {
+      "version": "1.2.2",
+      "resolved": "https://registry.npmjs.org/cookie-signature/-/cookie-signature-1.2.2.tgz",
+      "integrity": "sha512-D76uU73ulSXrD1UXF4KE2TMxVVwhsnCgfAyTg9k8P6KGZjlXKrOLe4dJQKI3Bxi5wjesZoFXJWElNWBjPZMbhg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=6.6.0"
+      }
+    },
+    "node_modules/debug": {
+      "version": "4.4.3",
+      "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
+      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+      "license": "MIT",
+      "dependencies": {
+        "ms": "^2.1.3"
+      },
+      "engines": {
+        "node": ">=6.0"
+      },
+      "peerDependenciesMeta": {
+        "supports-color": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/depd": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/depd/-/depd-2.0.0.tgz",
+      "integrity": "sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/dotenv": {
+      "version": "17.4.2",
+      "resolved": "https://registry.npmjs.org/dotenv/-/dotenv-17.4.2.tgz",
+      "integrity": "sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==",
+      "license": "BSD-2-Clause",
+      "engines": {
+        "node": ">=12"
+      },
+      "funding": {
+        "url": "https://dotenvx.com"
+      }
+    },
+    "node_modules/dunder-proto": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/dunder-proto/-/dunder-proto-1.0.1.tgz",
+      "integrity": "sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==",
+      "license": "MIT",
+      "dependencies": {
+        "call-bind-apply-helpers": "^1.0.1",
+        "es-errors": "^1.3.0",
+        "gopd": "^1.2.0"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      }
+    },
+    "node_modules/ecdsa-sig-formatter": {
+      "version": "1.0.11",
+      "resolved": "https://registry.npmjs.org/ecdsa-sig-formatter/-/ecdsa-sig-formatter-1.0.11.tgz",
+      "integrity": "sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==",
+      "license": "Apache-2.0",
+      "dependencies": {
+        "safe-buffer": "^5.0.1"
+      }
+    },
+    "node_modules/ee-first": {
+      "version": "1.1.1",
+      "resolved": "https://registry.npmjs.org/ee-first/-/ee-first-1.1.1.tgz",
+      "integrity": "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==",
+      "license": "MIT"
+    },
+    "node_modules/ejs": {
+      "version": "6.0.1",
+      "resolved": "https://registry.npmjs.org/ejs/-/ejs-6.0.1.tgz",
+      "integrity": "sha512-UaaM14yby8U3k02ihS1Bmj5Kz2d7CCQM1scxpgs4Mhkq8F1wR2gl3+Ts4h5Ne4Mnt7M9m4Dw7jsuMr3+xO4vZA==",
+      "license": "Apache-2.0",
+      "bin": {
+        "ejs": "bin/cli.js"
+      },
+      "engines": {
+        "node": ">=0.12.18"
+      }
+    },
+    "node_modules/encodeurl": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/encodeurl/-/encodeurl-2.0.0.tgz",
+      "integrity": "sha512-Q0n9HRi4m6JuGIV1eFlmvJB7ZEVxu93IrMyiMsGC0lrMJMWzRgx6WGquyfQgZVb31vhGgXnfmPNNXmxnOkRBrg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/es-define-property": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/es-define-property/-/es-define-property-1.0.1.tgz",
+      "integrity": "sha512-e3nRfgfUZ4rNGL232gUgX06QNyyez04KdjFrF+LTRoOXmrOgFKDg4BCdsjW8EnT69eqdYGmRpJwiPVYNrCaW3g==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.4"
+      }
+    },
+    "node_modules/es-errors": {
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/es-errors/-/es-errors-1.3.0.tgz",
+      "integrity": "sha512-Zf5H2Kxt2xjTvbJvP2ZWLEICxA6j+hAmMzIlypy4xcBg1vKVnx89Wy0GbS+kf5cwCVFFzdCFh2XSCFNULS6csw==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.4"
+      }
+    },
+    "node_modules/es-object-atoms": {
+      "version": "1.1.2",
+      "resolved": "https://registry.npmjs.org/es-object-atoms/-/es-object-atoms-1.1.2.tgz",
+      "integrity": "sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw==",
+      "license": "MIT",
+      "dependencies": {
+        "es-errors": "^1.3.0"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      }
+    },
+    "node_modules/escape-html": {
+      "version": "1.0.3",
+      "resolved": "https://registry.npmjs.org/escape-html/-/escape-html-1.0.3.tgz",
+      "integrity": "sha512-NiSupZ4OeuGwr68lGIeym/ksIZMJodUGOSCZ/FSnTxcrekbvqrgdUxlJOMpijaKZVjAJrWrGs/6Jy8OMuyj9ow==",
+      "license": "MIT"
+    },
+    "node_modules/etag": {
+      "version": "1.8.1",
+      "resolved": "https://registry.npmjs.org/etag/-/etag-1.8.1.tgz",
+      "integrity": "sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/express": {
+      "version": "5.2.1",
+      "resolved": "https://registry.npmjs.org/express/-/express-5.2.1.tgz",
+      "integrity": "sha512-hIS4idWWai69NezIdRt2xFVofaF4j+6INOpJlVOLDO8zXGpUVEVzIYk12UUi2JzjEzWL3IOAxcTubgz9Po0yXw==",
+      "license": "MIT",
+      "dependencies": {
+        "accepts": "^2.0.0",
+        "body-parser": "^2.2.1",
+        "content-disposition": "^1.0.0",
+        "content-type": "^1.0.5",
+        "cookie": "^0.7.1",
+        "cookie-signature": "^1.2.1",
+        "debug": "^4.4.0",
+        "depd": "^2.0.0",
+        "encodeurl": "^2.0.0",
+        "escape-html": "^1.0.3",
+        "etag": "^1.8.1",
+        "finalhandler": "^2.1.0",
+        "fresh": "^2.0.0",
+        "http-errors": "^2.0.0",
+        "merge-descriptors": "^2.0.0",
+        "mime-types": "^3.0.0",
+        "on-finished": "^2.4.1",
+        "once": "^1.4.0",
+        "parseurl": "^1.3.3",
+        "proxy-addr": "^2.0.7",
+        "qs": "^6.14.0",
+        "range-parser": "^1.2.1",
+        "router": "^2.2.0",
+        "send": "^1.1.0",
+        "serve-static": "^2.2.0",
+        "statuses": "^2.0.1",
+        "type-is": "^2.0.1",
+        "vary": "^1.1.2"
+      },
+      "engines": {
+        "node": ">= 18"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/fill-range": {
+      "version": "7.1.1",
+      "resolved": "https://registry.npmjs.org/fill-range/-/fill-range-7.1.1.tgz",
+      "integrity": "sha512-YsGpe3WHLK8ZYi4tWDg2Jy3ebRz2rXowDxnld4bkQB00cc/1Zw9AWnC0i9ztDJitivtQvaI9KaLyKrc+hBW0yg==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "to-regex-range": "^5.0.1"
+      },
+      "engines": {
+        "node": ">=8"
+      }
+    },
+    "node_modules/finalhandler": {
+      "version": "2.1.1",
+      "resolved": "https://registry.npmjs.org/finalhandler/-/finalhandler-2.1.1.tgz",
+      "integrity": "sha512-S8KoZgRZN+a5rNwqTxlZZePjT/4cnm0ROV70LedRHZ0p8u9fRID0hJUZQpkKLzro8LfmC8sx23bY6tVNxv8pQA==",
+      "license": "MIT",
+      "dependencies": {
+        "debug": "^4.4.0",
+        "encodeurl": "^2.0.0",
+        "escape-html": "^1.0.3",
+        "on-finished": "^2.4.1",
+        "parseurl": "^1.3.3",
+        "statuses": "^2.0.1"
+      },
+      "engines": {
+        "node": ">= 18.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/forwarded": {
+      "version": "0.2.0",
+      "resolved": "https://registry.npmjs.org/forwarded/-/forwarded-0.2.0.tgz",
+      "integrity": "sha512-buRG0fpBtRHSTCOASe6hD258tEubFoRLb4ZNA6NxMVHNw2gOcwHo9wyablzMzOA5z9xA9L1KNjk/Nt6MT9aYow==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/fresh": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/fresh/-/fresh-2.0.0.tgz",
+      "integrity": "sha512-Rx/WycZ60HOaqLKAi6cHRKKI7zxWbJ31MhntmtwMoaTeF7XFH9hhBp8vITaMidfljRQ6eYWCKkaTK+ykVJHP2A==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/fsevents": {
+      "version": "2.3.3",
+      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+      "dev": true,
+      "hasInstallScript": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+      }
+    },
+    "node_modules/function-bind": {
+      "version": "1.1.2",
+      "resolved": "https://registry.npmjs.org/function-bind/-/function-bind-1.1.2.tgz",
+      "integrity": "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==",
+      "license": "MIT",
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/get-intrinsic": {
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/get-intrinsic/-/get-intrinsic-1.3.0.tgz",
+      "integrity": "sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ==",
+      "license": "MIT",
+      "dependencies": {
+        "call-bind-apply-helpers": "^1.0.2",
+        "es-define-property": "^1.0.1",
+        "es-errors": "^1.3.0",
+        "es-object-atoms": "^1.1.1",
+        "function-bind": "^1.1.2",
+        "get-proto": "^1.0.1",
+        "gopd": "^1.2.0",
+        "has-symbols": "^1.1.0",
+        "hasown": "^2.0.2",
+        "math-intrinsics": "^1.1.0"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/get-proto": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/get-proto/-/get-proto-1.0.1.tgz",
+      "integrity": "sha512-sTSfBjoXBp89JvIKIefqw7U2CCebsc74kiY6awiGogKtoSGbgjYE/G/+l9sF3MWFPNc9IcoOC4ODfKHfxFmp0g==",
+      "license": "MIT",
+      "dependencies": {
+        "dunder-proto": "^1.0.1",
+        "es-object-atoms": "^1.0.0"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      }
+    },
+    "node_modules/glob-parent": {
+      "version": "5.1.2",
+      "resolved": "https://registry.npmjs.org/glob-parent/-/glob-parent-5.1.2.tgz",
+      "integrity": "sha512-AOIgSQCepiJYwP3ARnGx+5VnTu2HBYdzbGP45eLw1vr3zB3vZLeyed1sC9hnbcOc9/SrMyM5RPQrkGz4aS9Zow==",
+      "dev": true,
+      "license": "ISC",
+      "dependencies": {
+        "is-glob": "^4.0.1"
+      },
+      "engines": {
+        "node": ">= 6"
+      }
+    },
+    "node_modules/gopd": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/gopd/-/gopd-1.2.0.tgz",
+      "integrity": "sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/has-flag": {
+      "version": "3.0.0",
+      "resolved": "https://registry.npmjs.org/has-flag/-/has-flag-3.0.0.tgz",
+      "integrity": "sha512-sKJf1+ceQBr4SMkvQnBDNDtf4TXpVhVGateu0t918bl30FnbE2m4vNLX+VWe/dpjlb+HugGYzW7uQXH98HPEYw==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=4"
+      }
+    },
+    "node_modules/has-symbols": {
+      "version": "1.1.0",
+      "resolved": "https://registry.npmjs.org/has-symbols/-/has-symbols-1.1.0.tgz",
+      "integrity": "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/hasown": {
+      "version": "2.0.4",
+      "resolved": "https://registry.npmjs.org/hasown/-/hasown-2.0.4.tgz",
+      "integrity": "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==",
+      "license": "MIT",
+      "dependencies": {
+        "function-bind": "^1.1.2"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      }
+    },
+    "node_modules/http-errors": {
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/http-errors/-/http-errors-2.0.1.tgz",
+      "integrity": "sha512-4FbRdAX+bSdmo4AUFuS0WNiPz8NgFt+r8ThgNWmlrjQjt1Q7ZR9+zTlce2859x4KSXrwIsaeTqDoKQmtP8pLmQ==",
+      "license": "MIT",
+      "dependencies": {
+        "depd": "~2.0.0",
+        "inherits": "~2.0.4",
+        "setprototypeof": "~1.2.0",
+        "statuses": "~2.0.2",
+        "toidentifier": "~1.0.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/iconv-lite": {
+      "version": "0.7.3",
+      "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.7.3.tgz",
+      "integrity": "sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ==",
+      "license": "MIT",
+      "dependencies": {
+        "safer-buffer": ">= 2.1.2 < 3.0.0"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/ignore-by-default": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/ignore-by-default/-/ignore-by-default-1.0.1.tgz",
+      "integrity": "sha512-Ius2VYcGNk7T90CppJqcIkS5ooHUZyIQK+ClZfMfMNFEF9VSE73Fq+906u/CWu92x4gzZMWOwfFYckPObzdEbA==",
+      "dev": true,
+      "license": "ISC"
+    },
+    "node_modules/inherits": {
+      "version": "2.0.4",
+      "resolved": "https://registry.npmjs.org/inherits/-/inherits-2.0.4.tgz",
+      "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==",
+      "license": "ISC"
+    },
+    "node_modules/ipaddr.js": {
+      "version": "1.9.1",
+      "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-1.9.1.tgz",
+      "integrity": "sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.10"
+      }
+    },
+    "node_modules/is-binary-path": {
+      "version": "2.1.0",
+      "resolved": "https://registry.npmjs.org/is-binary-path/-/is-binary-path-2.1.0.tgz",
+      "integrity": "sha512-ZMERYes6pDydyuGidse7OsHxtbI7WVeUEozgR/g7rd0xUimYNlvZRE/K2MgZTjWy725IfelLeVcEM97mmtRGXw==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "binary-extensions": "^2.0.0"
+      },
+      "engines": {
+        "node": ">=8"
+      }
+    },
+    "node_modules/is-extglob": {
+      "version": "2.1.1",
+      "resolved": "https://registry.npmjs.org/is-extglob/-/is-extglob-2.1.1.tgz",
+      "integrity": "sha512-SbKbANkN603Vi4jEZv49LeVJMn4yGwsbzZworEoyEiutsN3nJYdbO36zfhGJ6QEDpOZIFkDtnq5JRxmvl3jsoQ==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "node_modules/is-glob": {
+      "version": "4.0.3",
+      "resolved": "https://registry.npmjs.org/is-glob/-/is-glob-4.0.3.tgz",
+      "integrity": "sha512-xelSayHH36ZgE7ZWhli7pW34hNbNl8Ojv5KVmkJD4hBdD3th8Tfk9vYasLM+mXWOZhFkgZfxhLSnrwRr4elSSg==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "is-extglob": "^2.1.1"
+      },
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "node_modules/is-number": {
+      "version": "7.0.0",
+      "resolved": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
+      "integrity": "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=0.12.0"
+      }
+    },
+    "node_modules/is-promise": {
+      "version": "4.0.0",
+      "resolved": "https://registry.npmjs.org/is-promise/-/is-promise-4.0.0.tgz",
+      "integrity": "sha512-hvpoI6korhJMnej285dSg6nu1+e6uxs7zG3BYAm5byqDsgJNWwxzM6z6iZiAgQR4TJ30JmBTOwqZUw3WlyH3AQ==",
+      "license": "MIT"
+    },
+    "node_modules/jsonwebtoken": {
+      "version": "9.0.3",
+      "resolved": "https://registry.npmjs.org/jsonwebtoken/-/jsonwebtoken-9.0.3.tgz",
+      "integrity": "sha512-MT/xP0CrubFRNLNKvxJ2BYfy53Zkm++5bX9dtuPbqAeQpTVe0MQTFhao8+Cp//EmJp244xt6Drw/GVEGCUj40g==",
+      "license": "MIT",
+      "dependencies": {
+        "jws": "^4.0.1",
+        "lodash.includes": "^4.3.0",
+        "lodash.isboolean": "^3.0.3",
+        "lodash.isinteger": "^4.0.4",
+        "lodash.isnumber": "^3.0.3",
+        "lodash.isplainobject": "^4.0.6",
+        "lodash.isstring": "^4.0.1",
+        "lodash.once": "^4.0.0",
+        "ms": "^2.1.1",
+        "semver": "^7.5.4"
+      },
+      "engines": {
+        "node": ">=12",
+        "npm": ">=6"
+      }
+    },
+    "node_modules/jwa": {
+      "version": "2.0.1",
+      "resolved": "https://registry.npmjs.org/jwa/-/jwa-2.0.1.tgz",
+      "integrity": "sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==",
+      "license": "MIT",
+      "dependencies": {
+        "buffer-equal-constant-time": "^1.0.1",
+        "ecdsa-sig-formatter": "1.0.11",
+        "safe-buffer": "^5.0.1"
+      }
+    },
+    "node_modules/jws": {
+      "version": "4.0.1",
+      "resolved": "https://registry.npmjs.org/jws/-/jws-4.0.1.tgz",
+      "integrity": "sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA==",
+      "license": "MIT",
+      "dependencies": {
+        "jwa": "^2.0.1",
+        "safe-buffer": "^5.0.1"
+      }
+    },
+    "node_modules/kareem": {
+      "version": "3.3.0",
+      "resolved": "https://registry.npmjs.org/kareem/-/kareem-3.3.0.tgz",
+      "integrity": "sha512-kpSuLD3/7RenBnjnJdOHXCKC8dTd1JzeOiJhN0necWWci6cC+qX+VuwPnMVgb+a4+KNJSfgqahpnfWaeDXCimw==",
+      "license": "Apache-2.0",
+      "engines": {
+        "node": ">=18.0.0"
+      }
+    },
+    "node_modules/lodash.includes": {
+      "version": "4.3.0",
+      "resolved": "https://registry.npmjs.org/lodash.includes/-/lodash.includes-4.3.0.tgz",
+      "integrity": "sha512-W3Bx6mdkRTGtlJISOvVD/lbqjTlPPUDTMnlXZFnVwi9NKJ6tiAk6LVdlhZMm17VZisqhKcgzpO5Wz91PCt5b0w==",
+      "license": "MIT"
+    },
+    "node_modules/lodash.isboolean": {
+      "version": "3.0.3",
+      "resolved": "https://registry.npmjs.org/lodash.isboolean/-/lodash.isboolean-3.0.3.tgz",
+      "integrity": "sha512-Bz5mupy2SVbPHURB98VAcw+aHh4vRV5IPNhILUCsOzRmsTmSQ17jIuqopAentWoehktxGd9e/hbIXq980/1QJg==",
+      "license": "MIT"
+    },
+    "node_modules/lodash.isinteger": {
+      "version": "4.0.4",
+      "resolved": "https://registry.npmjs.org/lodash.isinteger/-/lodash.isinteger-4.0.4.tgz",
+      "integrity": "sha512-DBwtEWN2caHQ9/imiNeEA5ys1JoRtRfY3d7V9wkqtbycnAmTvRRmbHKDV4a0EYc678/dia0jrte4tjYwVBaZUA==",
+      "license": "MIT"
+    },
+    "node_modules/lodash.isnumber": {
+      "version": "3.0.3",
+      "resolved": "https://registry.npmjs.org/lodash.isnumber/-/lodash.isnumber-3.0.3.tgz",
+      "integrity": "sha512-QYqzpfwO3/CWf3XP+Z+tkQsfaLL/EnUlXWVkIk5FUPc4sBdTehEqZONuyRt2P67PXAk+NXmTBcc97zw9t1FQrw==",
+      "license": "MIT"
+    },
+    "node_modules/lodash.isplainobject": {
+      "version": "4.0.6",
+      "resolved": "https://registry.npmjs.org/lodash.isplainobject/-/lodash.isplainobject-4.0.6.tgz",
+      "integrity": "sha512-oSXzaWypCMHkPC3NvBEaPHf0KsA5mvPrOPgQWDsbg8n7orZ290M0BmC/jgRZ4vcJ6DTAhjrsSYgdsW/F+MFOBA==",
+      "license": "MIT"
+    },
+    "node_modules/lodash.isstring": {
+      "version": "4.0.1",
+      "resolved": "https://registry.npmjs.org/lodash.isstring/-/lodash.isstring-4.0.1.tgz",
+      "integrity": "sha512-0wJxfxH1wgO3GrbuP+dTTk7op+6L41QCXbGINEmD+ny/G/eCqGzxyCsh7159S+mgDDcoarnBw6PC1PS5+wUGgw==",
+      "license": "MIT"
+    },
+    "node_modules/lodash.once": {
+      "version": "4.1.1",
+      "resolved": "https://registry.npmjs.org/lodash.once/-/lodash.once-4.1.1.tgz",
+      "integrity": "sha512-Sb487aTOCr9drQVL8pIxOzVhafOjZN9UU54hiN8PU3uAiSV7lx1yYNpbNmex2PK6dSJoNTSJUUswT651yww3Mg==",
+      "license": "MIT"
+    },
+    "node_modules/math-intrinsics": {
+      "version": "1.1.0",
+      "resolved": "https://registry.npmjs.org/math-intrinsics/-/math-intrinsics-1.1.0.tgz",
+      "integrity": "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.4"
+      }
+    },
+    "node_modules/media-typer": {
+      "version": "1.1.1",
+      "resolved": "https://registry.npmjs.org/media-typer/-/media-typer-1.1.1.tgz",
+      "integrity": "sha512-yz3xRaG20c6/BOzvYoDaGtPmGscs7YivItZEEqe6GbwNfHuxu9YNmvnEkMzKldAGY4/80pRcQRZSEnhquk9XuQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.8"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/memory-pager": {
+      "version": "1.5.0",
+      "resolved": "https://registry.npmjs.org/memory-pager/-/memory-pager-1.5.0.tgz",
+      "integrity": "sha512-ZS4Bp4r/Zoeq6+NLJpP+0Zzm0pR8whtGPf1XExKLJBAczGMnSi3It14OiNCStjQjM6NU1okjQGSxgEZN8eBYKg==",
+      "license": "MIT"
+    },
+    "node_modules/merge-descriptors": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/merge-descriptors/-/merge-descriptors-2.0.0.tgz",
+      "integrity": "sha512-Snk314V5ayFLhp3fkUREub6WtjBfPdCPY1Ln8/8munuLuiYhsABgBVWsozAG+MWMbVEvcdcpbi9R7ww22l9Q3g==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/sindresorhus"
+      }
+    },
+    "node_modules/mime-db": {
+      "version": "1.54.0",
+      "resolved": "https://registry.npmjs.org/mime-db/-/mime-db-1.54.0.tgz",
+      "integrity": "sha512-aU5EJuIN2WDemCcAp2vFBfp/m4EAhWJnUNSSw0ixs7/kXbd6Pg64EmwJkNdFhB8aWt1sH2CTXrLxo/iAGV3oPQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/mime-types": {
+      "version": "3.0.2",
+      "resolved": "https://registry.npmjs.org/mime-types/-/mime-types-3.0.2.tgz",
+      "integrity": "sha512-Lbgzdk0h4juoQ9fCKXW4by0UJqj+nOOrI9MJ1sSj4nI8aI2eo1qmvQEie4VD1glsS250n15LsWsYtCugiStS5A==",
+      "license": "MIT",
+      "dependencies": {
+        "mime-db": "^1.54.0"
+      },
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/minimatch": {
+      "version": "10.2.6",
+      "resolved": "https://registry.npmjs.org/minimatch/-/minimatch-10.2.6.tgz",
+      "integrity": "sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A==",
+      "dev": true,
+      "license": "BlueOak-1.0.0",
+      "dependencies": {
+        "brace-expansion": "^5.0.8"
+      },
+      "engines": {
+        "node": "18 || 20 || >=22"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/isaacs"
+      }
+    },
+    "node_modules/mongodb": {
+      "version": "7.5.0",
+      "resolved": "https://registry.npmjs.org/mongodb/-/mongodb-7.5.0.tgz",
+      "integrity": "sha512-5FnrEDLnvp6ycUOGLNLLU33BfCx2qmp2mJjGPDwKLruYsVzXVSK5fsGpoDXvsXJwBfBsD7ebMRdawbDxC2814g==",
+      "license": "Apache-2.0",
+      "dependencies": {
+        "@mongodb-js/saslprep": "^1.4.11",
+        "bson": "^7.2.0",
+        "mongodb-connection-string-url": "^7.0.1"
+      },
+      "engines": {
+        "node": ">=20.19.0"
+      },
+      "peerDependencies": {
+        "@aws-sdk/credential-providers": "^3.806.0",
+        "@mongodb-js/zstd": "^7.0.0",
+        "gcp-metadata": "^7.0.1",
+        "kerberos": "^7.0.0",
+        "mongodb-client-encryption": "^7.2.0",
+        "snappy": "^7.3.2",
+        "socks": "^2.8.6"
+      },
+      "peerDependenciesMeta": {
+        "@aws-sdk/credential-providers": {
+          "optional": true
+        },
+        "@mongodb-js/zstd": {
+          "optional": true
+        },
+        "gcp-metadata": {
+          "optional": true
+        },
+        "kerberos": {
+          "optional": true
+        },
+        "mongodb-client-encryption": {
+          "optional": true
+        },
+        "snappy": {
+          "optional": true
+        },
+        "socks": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/mongodb-connection-string-url": {
+      "version": "7.0.2",
+      "resolved": "https://registry.npmjs.org/mongodb-connection-string-url/-/mongodb-connection-string-url-7.0.2.tgz",
+      "integrity": "sha512-ZoS07RoFqpKYQwAk59qmrx8+jJHNHU30UjlU96QktiGn1ltvDr+vCznLX5DiUBLEpMAHatHNWV1nM/74ul66kA==",
+      "license": "Apache-2.0",
+      "dependencies": {
+        "@types/whatwg-url": "^13.0.0",
+        "whatwg-url": "^14.1.0"
+      },
+      "engines": {
+        "node": ">=20.19.0"
+      }
+    },
+    "node_modules/mongoose": {
+      "version": "9.9.1",
+      "resolved": "https://registry.npmjs.org/mongoose/-/mongoose-9.9.1.tgz",
+      "integrity": "sha512-hI00baDVPjV5VfYA3j+oLuPvLfmCQICWot9zJZgkuDMXnWEYhIx9xCPEOt2IC3lDJz6ajsz2bpgO24E+xsP6wg==",
+      "license": "MIT",
+      "dependencies": {
+        "@standard-schema/spec": "^1.1.0",
+        "kareem": "3.3.0",
+        "mongodb": "~7.5",
+        "mpath": "0.9.0",
+        "mquery": "6.0.0",
+        "ms": "2.1.3",
+        "sift": "17.1.3"
+      },
+      "engines": {
+        "node": ">=20.19.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/mongoose"
+      }
+    },
+    "node_modules/mpath": {
+      "version": "0.9.0",
+      "resolved": "https://registry.npmjs.org/mpath/-/mpath-0.9.0.tgz",
+      "integrity": "sha512-ikJRQTk8hw5DEoFVxHG1Gn9T/xcjtdnOKIU1JTmGjZZlg9LST2mBLmcX3/ICIbgJydT2GOc15RnNy5mHmzfSew==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=4.0.0"
+      }
+    },
+    "node_modules/mquery": {
+      "version": "6.0.0",
+      "resolved": "https://registry.npmjs.org/mquery/-/mquery-6.0.0.tgz",
+      "integrity": "sha512-b2KQNsmgtkscfeDgkYMcWGn9vZI9YoXh802VDEwE6qc50zxBFQ0Oo8ROkawbPAsXCY1/Z1yp0MagqsZStPWJjw==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=20.19.0"
+      }
+    },
+    "node_modules/ms": {
+      "version": "2.1.3",
+      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
+      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
+      "license": "MIT"
+    },
+    "node_modules/multer": {
+      "version": "2.2.0",
+      "resolved": "https://registry.npmjs.org/multer/-/multer-2.2.0.tgz",
+      "integrity": "sha512-6rdyFg2kLrMh9Jee7/BMPuV9lEAd7lLW2YUpF9/YxR7njyoUwwQ0ZPh3TaIY50Sw6vlyD2HW3wGOkTS4P79xrQ==",
+      "license": "MIT",
+      "dependencies": {
+        "append-field": "^1.0.0",
+        "busboy": "^1.6.0",
+        "concat-stream": "^2.0.0",
+        "type-is": "^1.6.18"
+      },
+      "engines": {
+        "node": ">= 10.16.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/multer/node_modules/media-typer": {
+      "version": "0.3.0",
+      "resolved": "https://registry.npmjs.org/media-typer/-/media-typer-0.3.0.tgz",
+      "integrity": "sha512-dq+qelQ9akHpcOl/gUVRTxVIOkAJ1wR3QAvb4RsVjS8oVoFjDGTc679wJYmUmknUF5HwMLOgb5O+a3KxfWapPQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/multer/node_modules/mime-db": {
+      "version": "1.52.0",
+      "resolved": "https://registry.npmjs.org/mime-db/-/mime-db-1.52.0.tgz",
+      "integrity": "sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/multer/node_modules/mime-types": {
+      "version": "2.1.35",
+      "resolved": "https://registry.npmjs.org/mime-types/-/mime-types-2.1.35.tgz",
+      "integrity": "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw==",
+      "license": "MIT",
+      "dependencies": {
+        "mime-db": "1.52.0"
+      },
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/multer/node_modules/type-is": {
+      "version": "1.6.18",
+      "resolved": "https://registry.npmjs.org/type-is/-/type-is-1.6.18.tgz",
+      "integrity": "sha512-TkRKr9sUTxEH8MdfuCSP7VizJyzRNMjj2J2do2Jr3Kym598JVdEksuzPQCnlFPW4ky9Q+iA+ma9BGm06XQBy8g==",
+      "license": "MIT",
+      "dependencies": {
+        "media-typer": "0.3.0",
+        "mime-types": "~2.1.24"
+      },
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/negotiator": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/negotiator/-/negotiator-1.0.0.tgz",
+      "integrity": "sha512-8Ofs/AUQh8MaEcrlq5xOX0CQ9ypTF5dl78mjlMNfOK08fzpgTHQRQPBxcPlEtIw0yRpws+Zo/3r+5WRby7u3Gg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      }
+    },
+    "node_modules/nodemon": {
+      "version": "3.1.14",
+      "resolved": "https://registry.npmjs.org/nodemon/-/nodemon-3.1.14.tgz",
+      "integrity": "sha512-jakjZi93UtB3jHMWsXL68FXSAosbLfY0In5gtKq3niLSkrWznrVBzXFNOEMJUfc9+Ke7SHWoAZsiMkNP3vq6Jw==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "chokidar": "^3.5.2",
+        "debug": "^4",
+        "ignore-by-default": "^1.0.1",
+        "minimatch": "^10.2.1",
+        "pstree.remy": "^1.1.8",
+        "semver": "^7.5.3",
+        "simple-update-notifier": "^2.0.0",
+        "supports-color": "^5.5.0",
+        "touch": "^3.1.0",
+        "undefsafe": "^2.0.5"
+      },
+      "bin": {
+        "nodemon": "bin/nodemon.js"
+      },
+      "engines": {
+        "node": ">=10"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/nodemon"
+      }
+    },
+    "node_modules/normalize-path": {
+      "version": "3.0.0",
+      "resolved": "https://registry.npmjs.org/normalize-path/-/normalize-path-3.0.0.tgz",
+      "integrity": "sha512-6eZs5Ls3WtCisHWp9S2GUy8dqkpGi4BVSz3GaqiE6ezub0512ESztXUwUB6C6IKbQkY2Pnb/mD4WYojCRwcwLA==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "node_modules/object-inspect": {
+      "version": "1.13.4",
+      "resolved": "https://registry.npmjs.org/object-inspect/-/object-inspect-1.13.4.tgz",
+      "integrity": "sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/on-finished": {
+      "version": "2.4.1",
+      "resolved": "https://registry.npmjs.org/on-finished/-/on-finished-2.4.1.tgz",
+      "integrity": "sha512-oVlzkg3ENAhCk2zdv7IJwd/QUD4z2RxRwpkcGY8psCVcCYZNq4wYnVWALHM+brtuJjePWiYF/ClmuDr8Ch5+kg==",
+      "license": "MIT",
+      "dependencies": {
+        "ee-first": "1.1.1"
+      },
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/once": {
+      "version": "1.4.0",
+      "resolved": "https://registry.npmjs.org/once/-/once-1.4.0.tgz",
+      "integrity": "sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==",
+      "license": "ISC",
+      "dependencies": {
+        "wrappy": "1"
+      }
+    },
+    "node_modules/parseurl": {
+      "version": "1.3.3",
+      "resolved": "https://registry.npmjs.org/parseurl/-/parseurl-1.3.3.tgz",
+      "integrity": "sha512-CiyeOxFT/JZyN5m0z9PfXw4SCBJ6Sygz1Dpl0wqjlhDEGGBP1GnsUVEL0p63hoG1fcj3fHynXi9NYO4nWOL+qQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/path-to-regexp": {
+      "version": "8.4.2",
+      "resolved": "https://registry.npmjs.org/path-to-regexp/-/path-to-regexp-8.4.2.tgz",
+      "integrity": "sha512-qRcuIdP69NPm4qbACK+aDogI5CBDMi1jKe0ry5rSQJz8JVLsC7jV8XpiJjGRLLol3N+R5ihGYcrPLTno6pAdBA==",
+      "license": "MIT",
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/picomatch": {
+      "version": "2.3.2",
+      "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-2.3.2.tgz",
+      "integrity": "sha512-V7+vQEJ06Z+c5tSye8S+nHUfI51xoXIXjHQ99cQtKUkQqqO1kO/KCJUfZXuB47h/YBlDhah2H3hdUGXn8ie0oA==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=8.6"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/jonschlinkert"
+      }
+    },
+    "node_modules/proxy-addr": {
+      "version": "2.0.7",
+      "resolved": "https://registry.npmjs.org/proxy-addr/-/proxy-addr-2.0.7.tgz",
+      "integrity": "sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==",
+      "license": "MIT",
+      "dependencies": {
+        "forwarded": "0.2.0",
+        "ipaddr.js": "1.9.1"
+      },
+      "engines": {
+        "node": ">= 0.10"
+      }
+    },
+    "node_modules/pstree.remy": {
+      "version": "1.1.8",
+      "resolved": "https://registry.npmjs.org/pstree.remy/-/pstree.remy-1.1.8.tgz",
+      "integrity": "sha512-77DZwxQmxKnu3aR542U+X8FypNzbfJ+C5XQDk3uWjWxn6151aIMGthWYRXTqT1E5oJvg+ljaa2OJi+VfvCOQ8w==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/punycode": {
+      "version": "2.3.1",
+      "resolved": "https://registry.npmjs.org/punycode/-/punycode-2.3.1.tgz",
+      "integrity": "sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=6"
+      }
+    },
+    "node_modules/qs": {
+      "version": "6.15.3",
+      "resolved": "https://registry.npmjs.org/qs/-/qs-6.15.3.tgz",
+      "integrity": "sha512-O9gl3zCl5h5blw1KGUzQKhA5oUXSl8rwUIM5o0S3nCXMliSvy5Dzx7/DJcI+SwgICv+IneSZwhBh1oSyEHA71A==",
+      "license": "BSD-3-Clause",
+      "dependencies": {
+        "es-define-property": "^1.0.1",
+        "side-channel": "^1.1.1"
+      },
+      "engines": {
+        "node": ">=0.6"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/range-parser": {
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/range-parser/-/range-parser-1.3.0.tgz",
+      "integrity": "sha512-hek2mFQpPuI4E1BBKrSto+BU3e3x4xuarsbiwr3+lf7p44juvFMV0XFWQAP3xUyqXA4RrXLIoaSUGbSt056ZMw==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.6"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/raw-body": {
+      "version": "3.0.2",
+      "resolved": "https://registry.npmjs.org/raw-body/-/raw-body-3.0.2.tgz",
+      "integrity": "sha512-K5zQjDllxWkf7Z5xJdV0/B0WTNqx6vxG70zJE4N0kBs4LovmEYWJzQGxC9bS9RAKu3bgM40lrd5zoLJ12MQ5BA==",
+      "license": "MIT",
+      "dependencies": {
+        "bytes": "~3.1.2",
+        "http-errors": "~2.0.1",
+        "iconv-lite": "~0.7.0",
+        "unpipe": "~1.0.0"
+      },
+      "engines": {
+        "node": ">= 0.10"
+      }
+    },
+    "node_modules/readable-stream": {
+      "version": "3.6.2",
+      "resolved": "https://registry.npmjs.org/readable-stream/-/readable-stream-3.6.2.tgz",
+      "integrity": "sha512-9u/sniCrY3D5WdsERHzHE4G2YCXqoG5FTHUiCC4SIbr6XcLZBY05ya9EKjYek9O5xOAwjGq+1JdGBAS7Q9ScoA==",
+      "license": "MIT",
+      "dependencies": {
+        "inherits": "^2.0.3",
+        "string_decoder": "^1.1.1",
+        "util-deprecate": "^1.0.1"
+      },
+      "engines": {
+        "node": ">= 6"
+      }
+    },
+    "node_modules/readdirp": {
+      "version": "3.6.0",
+      "resolved": "https://registry.npmjs.org/readdirp/-/readdirp-3.6.0.tgz",
+      "integrity": "sha512-hOS089on8RduqdbhvQ5Z37A0ESjsqz6qnRcffsMU3495FuTdqSm+7bhJ29JvIOsBDEEnan5DPu9t3To9VRlMzA==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "picomatch": "^2.2.1"
+      },
+      "engines": {
+        "node": ">=8.10.0"
+      }
+    },
+    "node_modules/router": {
+      "version": "2.2.0",
+      "resolved": "https://registry.npmjs.org/router/-/router-2.2.0.tgz",
+      "integrity": "sha512-nLTrUKm2UyiL7rlhapu/Zl45FwNgkZGaCpZbIHajDYgwlJCOzLSk+cIPAnsEqV955GjILJnKbdQC1nVPz+gAYQ==",
+      "license": "MIT",
+      "dependencies": {
+        "debug": "^4.4.0",
+        "depd": "^2.0.0",
+        "is-promise": "^4.0.0",
+        "parseurl": "^1.3.3",
+        "path-to-regexp": "^8.0.0"
+      },
+      "engines": {
+        "node": ">= 18"
+      }
+    },
+    "node_modules/safe-buffer": {
+      "version": "5.2.1",
+      "resolved": "https://registry.npmjs.org/safe-buffer/-/safe-buffer-5.2.1.tgz",
+      "integrity": "sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ==",
+      "funding": [
+        {
+          "type": "github",
+          "url": "https://github.com/sponsors/feross"
+        },
+        {
+          "type": "patreon",
+          "url": "https://www.patreon.com/feross"
+        },
+        {
+          "type": "consulting",
+          "url": "https://feross.org/support"
+        }
+      ],
+      "license": "MIT"
+    },
+    "node_modules/safer-buffer": {
+      "version": "2.1.2",
+      "resolved": "https://registry.npmjs.org/safer-buffer/-/safer-buffer-2.1.2.tgz",
+      "integrity": "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg==",
+      "license": "MIT"
+    },
+    "node_modules/semver": {
+      "version": "7.8.5",
+      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.5.tgz",
+      "integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
+      "license": "ISC",
+      "bin": {
+        "semver": "bin/semver.js"
+      },
+      "engines": {
+        "node": ">=10"
+      }
+    },
+    "node_modules/send": {
+      "version": "1.2.1",
+      "resolved": "https://registry.npmjs.org/send/-/send-1.2.1.tgz",
+      "integrity": "sha512-1gnZf7DFcoIcajTjTwjwuDjzuz4PPcY2StKPlsGAQ1+YH20IRVrBaXSWmdjowTJ6u8Rc01PoYOGHXfP1mYcZNQ==",
+      "license": "MIT",
+      "dependencies": {
+        "debug": "^4.4.3",
+        "encodeurl": "^2.0.0",
+        "escape-html": "^1.0.3",
+        "etag": "^1.8.1",
+        "fresh": "^2.0.0",
+        "http-errors": "^2.0.1",
+        "mime-types": "^3.0.2",
+        "ms": "^2.1.3",
+        "on-finished": "^2.4.1",
+        "range-parser": "^1.2.1",
+        "statuses": "^2.0.2"
+      },
+      "engines": {
+        "node": ">= 18"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/serve-static": {
+      "version": "2.2.1",
+      "resolved": "https://registry.npmjs.org/serve-static/-/serve-static-2.2.1.tgz",
+      "integrity": "sha512-xRXBn0pPqQTVQiC8wyQrKs2MOlX24zQ0POGaj0kultvoOCstBQM5yvOhAVSUwOMjQtTvsPWoNCHfPGwaaQJhTw==",
+      "license": "MIT",
+      "dependencies": {
+        "encodeurl": "^2.0.0",
+        "escape-html": "^1.0.3",
+        "parseurl": "^1.3.3",
+        "send": "^1.2.0"
+      },
+      "engines": {
+        "node": ">= 18"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/setprototypeof": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/setprototypeof/-/setprototypeof-1.2.0.tgz",
+      "integrity": "sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw==",
+      "license": "ISC"
+    },
+    "node_modules/side-channel": {
+      "version": "1.1.1",
+      "resolved": "https://registry.npmjs.org/side-channel/-/side-channel-1.1.1.tgz",
+      "integrity": "sha512-6x6dK6zJdpTzF4sQeNYxwtvBzf6Eg4GtlesS94HOvTudUeyK2WXAaIfmDgsyslYrRBeFIlsi54AYsFGUuhmvrQ==",
+      "license": "MIT",
+      "dependencies": {
+        "es-errors": "^1.3.0",
+        "object-inspect": "^1.13.4",
+        "side-channel-list": "^1.0.1",
+        "side-channel-map": "^1.0.1",
+        "side-channel-weakmap": "^1.0.2"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/side-channel-list": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/side-channel-list/-/side-channel-list-1.0.1.tgz",
+      "integrity": "sha512-mjn/0bi/oUURjc5Xl7IaWi/OJJJumuoJFQJfDDyO46+hBWsfaVM65TBHq2eoZBhzl9EchxOijpkbRC8SVBQU0w==",
+      "license": "MIT",
+      "dependencies": {
+        "es-errors": "^1.3.0",
+        "object-inspect": "^1.13.4"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/side-channel-map": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/side-channel-map/-/side-channel-map-1.0.1.tgz",
+      "integrity": "sha512-VCjCNfgMsby3tTdo02nbjtM/ewra6jPHmpThenkTYh8pG9ucZ/1P8So4u4FGBek/BjpOVsDCMoLA/iuBKIFXRA==",
+      "license": "MIT",
+      "dependencies": {
+        "call-bound": "^1.0.2",
+        "es-errors": "^1.3.0",
+        "get-intrinsic": "^1.2.5",
+        "object-inspect": "^1.13.3"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/side-channel-weakmap": {
+      "version": "1.0.2",
+      "resolved": "https://registry.npmjs.org/side-channel-weakmap/-/side-channel-weakmap-1.0.2.tgz",
+      "integrity": "sha512-WPS/HvHQTYnHisLo9McqBHOJk2FkHO/tlpvldyrnem4aeQp4hai3gythswg6p01oSoTl58rcpiFAjF2br2Ak2A==",
+      "license": "MIT",
+      "dependencies": {
+        "call-bound": "^1.0.2",
+        "es-errors": "^1.3.0",
+        "get-intrinsic": "^1.2.5",
+        "object-inspect": "^1.13.3",
+        "side-channel-map": "^1.0.1"
+      },
+      "engines": {
+        "node": ">= 0.4"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/ljharb"
+      }
+    },
+    "node_modules/sift": {
+      "version": "17.1.3",
+      "resolved": "https://registry.npmjs.org/sift/-/sift-17.1.3.tgz",
+      "integrity": "sha512-Rtlj66/b0ICeFzYTuNvX/EF1igRbbnGSvEyT79McoZa/DeGhMyC5pWKOEsZKnpkqtSeovd5FL/bjHWC3CIIvCQ==",
+      "license": "MIT"
+    },
+    "node_modules/simple-update-notifier": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/simple-update-notifier/-/simple-update-notifier-2.0.0.tgz",
+      "integrity": "sha512-a2B9Y0KlNXl9u/vsW6sTIu9vGEpfKu2wRV6l1H3XEas/0gUIzGzBoP/IouTcUQbm9JWZLH3COxyn03TYlFax6w==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "semver": "^7.5.3"
+      },
+      "engines": {
+        "node": ">=10"
+      }
+    },
+    "node_modules/sparse-bitfield": {
+      "version": "3.0.3",
+      "resolved": "https://registry.npmjs.org/sparse-bitfield/-/sparse-bitfield-3.0.3.tgz",
+      "integrity": "sha512-kvzhi7vqKTfkh0PZU+2D2PIllw2ymqJKujUcyPMd9Y75Nv4nPbGJZXNhxsgdQab2BmlDct1YnfQCguEvHr7VsQ==",
+      "license": "MIT",
+      "dependencies": {
+        "memory-pager": "^1.0.2"
+      }
+    },
+    "node_modules/statuses": {
+      "version": "2.0.2",
+      "resolved": "https://registry.npmjs.org/statuses/-/statuses-2.0.2.tgz",
+      "integrity": "sha512-DvEy55V3DB7uknRo+4iOGT5fP1slR8wQohVdknigZPMpMstaKJQWhwiYBACJE3Ul2pTnATihhBYnRhZQHGBiRw==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/streamsearch": {
+      "version": "1.1.0",
+      "resolved": "https://registry.npmjs.org/streamsearch/-/streamsearch-1.1.0.tgz",
+      "integrity": "sha512-Mcc5wHehp9aXz1ax6bZUyY5afg9u2rv5cqQI3mRrYkGC8rW2hM02jWuwjtL++LS5qinSyhj2QfLyNsuc+VsExg==",
+      "engines": {
+        "node": ">=10.0.0"
+      }
+    },
+    "node_modules/string_decoder": {
+      "version": "1.3.0",
+      "resolved": "https://registry.npmjs.org/string_decoder/-/string_decoder-1.3.0.tgz",
+      "integrity": "sha512-hkRX8U1WjJFd8LsDJ2yQ/wWWxaopEsABU1XfkM8A+j0+85JAGppt16cr1Whg6KIbb4okU6Mql6BOj+uup/wKeA==",
+      "license": "MIT",
+      "dependencies": {
+        "safe-buffer": "~5.2.0"
+      }
+    },
+    "node_modules/supports-color": {
+      "version": "5.5.0",
+      "resolved": "https://registry.npmjs.org/supports-color/-/supports-color-5.5.0.tgz",
+      "integrity": "sha512-QjVjwdXIt408MIiAqCX4oUKsgU2EqAGzs2Ppkm4aQYbjm+ZEWEcW4SfFNTr4uMNZma0ey4f5lgLrkB0aX0QMow==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "has-flag": "^3.0.0"
+      },
+      "engines": {
+        "node": ">=4"
+      }
+    },
+    "node_modules/to-regex-range": {
+      "version": "5.0.1",
+      "resolved": "https://registry.npmjs.org/to-regex-range/-/to-regex-range-5.0.1.tgz",
+      "integrity": "sha512-65P7iz6X5yEr1cwcgvQxbbIw7Uk3gOy5dIdtZ4rDveLqhrdJP+Li/Hx6tyK0NEb+2GCyneCMJiGqrADCSNk8sQ==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "is-number": "^7.0.0"
+      },
+      "engines": {
+        "node": ">=8.0"
+      }
+    },
+    "node_modules/toidentifier": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/toidentifier/-/toidentifier-1.0.1.tgz",
+      "integrity": "sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=0.6"
+      }
+    },
+    "node_modules/touch": {
+      "version": "3.1.1",
+      "resolved": "https://registry.npmjs.org/touch/-/touch-3.1.1.tgz",
+      "integrity": "sha512-r0eojU4bI8MnHr8c5bNo7lJDdI2qXlWWJk6a9EAFG7vbhTjElYhBVS3/miuE0uOuoLdb8Mc/rVfsmm6eo5o9GA==",
+      "dev": true,
+      "license": "ISC",
+      "bin": {
+        "nodetouch": "bin/nodetouch.js"
+      }
+    },
+    "node_modules/tr46": {
+      "version": "5.1.1",
+      "resolved": "https://registry.npmjs.org/tr46/-/tr46-5.1.1.tgz",
+      "integrity": "sha512-hdF5ZgjTqgAntKkklYw0R03MG2x/bSzTtkxmIRw/sTNV8YXsCJ1tfLAX23lhxhHJlEf3CRCOCGGWw3vI3GaSPw==",
+      "license": "MIT",
+      "dependencies": {
+        "punycode": "^2.3.1"
+      },
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/type-is": {
+      "version": "2.1.0",
+      "resolved": "https://registry.npmjs.org/type-is/-/type-is-2.1.0.tgz",
+      "integrity": "sha512-faYHw0anBbc/kWF3zFTEnxSFOAGUX9GFbOBthvDdLsIlEoWOFOtS0zgCiQYwIskL9iGXZL3kAXD8OoZ4GmMATA==",
+      "license": "MIT",
+      "dependencies": {
+        "content-type": "^2.0.0",
+        "media-typer": "^1.1.0",
+        "mime-types": "^3.0.0"
+      },
+      "engines": {
+        "node": ">= 18"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/type-is/node_modules/content-type": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/content-type/-/content-type-2.0.0.tgz",
+      "integrity": "sha512-j/O/d7GcZCyNl7/hwZAb606rzqkyvaDctLmckbxLzHvFBzTJHuGEdodATcP3yIRoDrLHkIATJuvzbFlp/ki2cQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/express"
+      }
+    },
+    "node_modules/typedarray": {
+      "version": "0.0.6",
+      "resolved": "https://registry.npmjs.org/typedarray/-/typedarray-0.0.6.tgz",
+      "integrity": "sha512-/aCDEGatGvZ2BIk+HmLf4ifCJFwvKFNb9/JeZPMulfgFracn9QFcAf5GO8B/mweUjSoblS5In0cWhqpfs/5PQA==",
+      "license": "MIT"
+    },
+    "node_modules/undefsafe": {
+      "version": "2.0.5",
+      "resolved": "https://registry.npmjs.org/undefsafe/-/undefsafe-2.0.5.tgz",
+      "integrity": "sha512-WxONCrssBM8TSPRqN5EmsjVrsv4A8X12J4ArBiiayv3DyyG3ZlIg6yysuuSYdZsVz3TKcTg2fd//Ujd4CHV1iA==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/unpipe": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/unpipe/-/unpipe-1.0.0.tgz",
+      "integrity": "sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/util-deprecate": {
+      "version": "1.0.2",
+      "resolved": "https://registry.npmjs.org/util-deprecate/-/util-deprecate-1.0.2.tgz",
+      "integrity": "sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==",
+      "license": "MIT"
+    },
+    "node_modules/vary": {
+      "version": "1.1.2",
+      "resolved": "https://registry.npmjs.org/vary/-/vary-1.1.2.tgz",
+      "integrity": "sha512-BNGbWLfd0eUPabhkXUVm0j8uuvREyTh5ovRa/dyow/BqAbZJyC+5fU+IzQOzmAKzYqYRAISoRhdQr3eIZ/PXqg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">= 0.8"
+      }
+    },
+    "node_modules/webidl-conversions": {
+      "version": "7.0.0",
+      "resolved": "https://registry.npmjs.org/webidl-conversions/-/webidl-conversions-7.0.0.tgz",
+      "integrity": "sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==",
+      "license": "BSD-2-Clause",
+      "engines": {
+        "node": ">=12"
+      }
+    },
+    "node_modules/whatwg-url": {
+      "version": "14.2.0",
+      "resolved": "https://registry.npmjs.org/whatwg-url/-/whatwg-url-14.2.0.tgz",
+      "integrity": "sha512-De72GdQZzNTUBBChsXueQUnPKDkg/5A5zp7pFDuQAj5UFoENpiACU0wlCvzpAGnTkj++ihpKwKyYewn/XNUbKw==",
+      "license": "MIT",
+      "dependencies": {
+        "tr46": "^5.1.0",
+        "webidl-conversions": "^7.0.0"
+      },
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/wrappy": {
+      "version": "1.0.2",
+      "resolved": "https://registry.npmjs.org/wrappy/-/wrappy-1.0.2.tgz",
+      "integrity": "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==",
+      "license": "ISC"
+    }
+  }
+}
+--- package.json ---
+{
+  "name": "foodiehub-latest",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zahar-74/FoodieHub-Latest.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/zahar-74/FoodieHub-Latest/issues"
+  },
+  "homepage": "https://github.com/zahar-74/FoodieHub-Latest#readme",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^17.4.2",
+    "ejs": "^6.0.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.9.1",
+    "multer": "^2.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
+--- README.md ---

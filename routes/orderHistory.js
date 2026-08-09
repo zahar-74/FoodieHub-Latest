@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const orderHistoryController = require('../controllers/orderHistoryController');
+const { requireAuth } = require('../middleware/auth');
 
-router.get('/orders', orderHistoryController.getOrdersJson);
-router.get('/order-history', orderHistoryController.renderOrderHistoryPage);
+// Protect these routes with authentication
+router.get('/orders', requireAuth, orderHistoryController.getOrdersJson);
+router.get('/order-history', requireAuth, orderHistoryController.renderOrderHistoryPage);
 
 module.exports = router;

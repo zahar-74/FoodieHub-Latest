@@ -90,3 +90,37 @@ exports.adminDeleteReview = async (req, res) => {
         res.status(500).json({ error: 'Could not delete review' });
     }
 };
+// POST /menu/:id/reviews
+exports.createReview = async (req, res) => {
+    try {
+        const { rating, comment } = req.body;
+        const menuItemId = req.params.id;
+
+        // Validate rating
+        if (!rating || !comment) {
+            return res.status(400).json({ error: 'Rating and comment are required' });
+        }
+        const ratingNum = parseInt(rating);
+        if (isNaN(ratingNum) || ratingNum < 1 || ratingNum > 5) {
+            return res.status(400).json({ error: 'Rating must be between 1 and 5' });
+        }
+
+        // Check if menu item exists
+        const menuItem = await MenuItem.findById(menuItemId);
+        if (!menuItem) {
+            return res.status(404).json({ error: 'Menu item not found' });
+        }
+
+        const review = await Review.create({
+            menuItem: menuItemId,
+            user: req.user.id,
+            rating: ratingNum,
+            comment
+        });
+
+        res.status(201).json(review);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Could not create review' });
+    }
+};

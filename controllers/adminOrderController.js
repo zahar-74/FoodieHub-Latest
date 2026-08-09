@@ -44,10 +44,17 @@ async function getOrders(req, res) {
 async function updateOrderStatus(req, res) {
     try {
         const { id } = req.params;
+        const { status } = req.body;
 
         if (!mongoose.Types.ObjectId.isValid(id)) {
             return res.status(400).json({
                 error: 'Invalid order ID'
+            });
+        }
+
+        if (!orderStatuses.includes(status)) {
+            return res.status(400).json({
+                error: 'Invalid order status'
             });
         }
 
@@ -59,21 +66,14 @@ async function updateOrderStatus(req, res) {
             });
         }
 
-        const currentIndex = orderStatuses.indexOf(order.status);
-
-        if (currentIndex === -1) {
-            return res.status(400).json({
-                error: 'Invalid current order status'
-            });
-        }
-
         if (order.status === 'Delivered') {
             return res.status(400).json({
                 error: 'Delivered orders cannot be updated'
             });
         }
 
-        order.status = orderStatuses[currentIndex + 1];
+        // ✅ Now honors the status the admin actually selected
+        order.status = status;
         await order.save();
 
         return res.status(200).json({

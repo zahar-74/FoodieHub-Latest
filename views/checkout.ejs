@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FoodieHub - Checkout</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+
+<body>
+    <header>
+        <nav>
+            <div class="logo">FoodieHub</div>
+            <ul class="nav-links">
+                <li><a href="/">Menu</a></li>
+                <li><a href="/cart">Cart <span id="cart-badge">0</span></a></li>
+                <li><a href="/order-history">My Orders</a></li>
+                <li id="nav-login-item"><a href="/login">Login</a></li>
+                <li id="nav-register-item"><a href="/register">Register</a></li>
+                <li id="nav-logout-item" style="display:none;"><a href="/logout">Logout</a></li>
+            </ul>
+        </nav>
+    </header>
+    <main>
+        <h1>Checkout</h1>
+        <form id="checkout-form">
+            <label for="delivery-address">Delivery Address</label>
+            <input type="text" id="delivery-address" name="deliveryAddress" required>
+            <span id="delivery-address-error" class="error-message"></span>
+
+            <label for="schedule-time">Schedule for (optional)</label>
+            <input type="datetime-local" id="schedule-time" name="scheduledFor">
+            <span id="schedule-time-error" class="error-message"></span>
+
+            <p>Your cart total: <span id="cart-total-display">$0.00</span></p>
+            <span id="cart-error" class="error-message"></span>
+
+            <button type="submit">Place Order</button>
+        </form>
+        <a href="/cart">← Back to Cart</a>
+    </main>
+    <footer>
+        <p>&copy; 2026 FoodieHub. Built with Hunger and Passion.</p>
+    </footer>
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/fetch.js"></script>
+    <script src="/js/auth-status.js"></script>
+    <script>
+        // Display cart total on load
+        document.addEventListener('DOMContentLoaded', function () {
+            const totalEl = document.getElementById('cart-total-display');
+            if (typeof cart !== 'undefined' && cart.length > 0) {
+                const total = cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+                totalEl.textContent = '$' + total.toFixed(2);
+            } else {
+                totalEl.textContent = '$0.00';
+            }
+        });
+
+        // Submit order via AJAX
+
+    </script>
+</body>
+
+</html>

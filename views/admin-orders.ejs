@@ -15,8 +15,9 @@
             <ul class="nav-links">
                 <li><a href="/admin/dashboard">Dashboard</a></li>
                 <li><a href="/admin/orders">Manage Orders</a></li>
-                <li><a href="admin-menu-manage.html">Manage Menu</a></li>
-                <li><a href="index.html">View Site</a></li>
+                <li><a href="/admin-menu-manage">Manage Menu</a></li>
+                <li><a href="/">View Site</a></li>
+                <li id="nav-logout-item" style="display:none;"><a href="/logout">Logout</a></li>
             </ul>
         </nav>
     </header>
@@ -35,49 +36,39 @@
                 </tr>
             </thead>
             <tbody>
-    <% if (orders.length === 0) { %>
-        <tr>
-            <td colspan="6">No orders found.</td>
-        </tr>
-    <% } else { %>
-        <% orders.forEach(order => { %>
-            <tr>
-                <td><%= order._id %></td>
-
-                <td>
-                    <%= order.customerId
-                        ? order.customerId.name
-                        : 'Unknown customer' %>
-                </td>
-
-                <td>
-                    <%= order.items.reduce(
-                        (sum, item) => sum + (item.quantity || 0),
-                        0
-                    ) %>
-                </td>
-
-                <td>$<%= (order.total || 0).toFixed(2) %></td>
-
-                <td><%= order.status %></td>
-
-                <td>
-                    <% if (order.status === 'Delivered') { %>
-                        <button class="action-btn" disabled>
-                            Delivered
-                        </button>
+                <% if (orders.length===0) { %>
+                    <tr>
+                        <td colspan="6">No orders found.</td>
+                    </tr>
                     <% } else { %>
-                        <button
-                            class="action-btn update-status"
-                            onclick="updateOrderStatus('<%= order._id %>')">
-                            Update Status
-                        </button>
-                    <% } %>
-                </td>
-            </tr>
-        <% }) %>
-    <% } %>
-</tbody>
+                        <% orders.forEach(order=> { %>
+                            <tr>
+                                <td>
+                                    <%= order._id %>
+                                </td>
+                                <td>
+                                    <%= order.customerId ? order.customerId.name : 'Unknown customer' %>
+                                </td>
+                                <td>
+                                    <%= order.items.reduce((sum, item)=> sum + (item.quantity || 0), 0) %>
+                                </td>
+                                <td>$<%= (order.total || 0).toFixed(2) %>
+                                </td>
+                                <td>
+                                    <%= order.status %>
+                                </td>
+                                <td>
+                                    <% if (order.status==='Delivered' ) { %>
+                                        <button class="action-btn" disabled>Delivered</button>
+                                        <% } else { %>
+                                            <button class="action-btn update-status"
+                                                onclick="updateOrderStatus('<%= order._id %>')">Update Status</button>
+                                            <% } %>
+                                </td>
+                            </tr>
+                            <% }) %>
+                                <% } %>
+            </tbody>
         </table>
     </main>
 
@@ -90,6 +81,7 @@
     <script src="/js/validation.js"></script>
     <script src="/js/admin.js"></script>
     <script src="/js/fetch.js"></script>
+    <script src="/js/auth-status.js"></script>
 </body>
 
 </html>

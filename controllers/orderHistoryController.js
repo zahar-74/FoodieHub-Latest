@@ -1,17 +1,13 @@
 const Order = require('../models/Order');
 
-// GET /orders?customerId=...  (JSON — used for reorder logic)
+// GET /orders (JSON – uses authenticated user)
 exports.getOrdersJson = async (req, res) => {
     try {
-        const { customerId } = req.query;
-        if (!customerId) {
-            return res.status(400).json({ error: 'customerId query parameter is required' });
-        }
-
+        // Use the logged-in user's ID from the JWT
+        const customerId = req.user.id;
         const orders = await Order.find({ customerId })
             .populate('items.menuItem')
             .sort({ createdAt: -1 });
-
         res.json(orders);
     } catch (err) {
         console.error(err);
@@ -19,18 +15,16 @@ exports.getOrdersJson = async (req, res) => {
     }
 };
 
-// GET /order-history?customerId=...  (renders the page)
+// GET /order-history (renders the page) – pass customerId from req.user
 exports.renderOrderHistoryPage = async (req, res) => {
     try {
-        const { customerId } = req.query;
+        const customerId = req.user ? req.user.id : null;
         let orders = [];
-
         if (customerId) {
             orders = await Order.find({ customerId })
                 .populate('items.menuItem')
                 .sort({ createdAt: -1 });
         }
-
         res.render('order-history', { orders });
     } catch (err) {
         console.error(err);

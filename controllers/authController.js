@@ -29,8 +29,8 @@ async function register(req, res) {
             !password ||
             password.length < 6
         ) {
-            return res.status(400).json({
-                error: 'Please provide a valid name, email, and password'
+            return res.status(400).render('register', {
+                error: 'Please provide a valid name, email, and password (min 6 chars)'
             });
         }
 
@@ -41,7 +41,7 @@ async function register(req, res) {
         });
 
         if (existingUser) {
-            return res.status(400).json({
+            return res.status(400).render('register', {
                 error: 'Email is already registered'
             });
         }
@@ -49,7 +49,7 @@ async function register(req, res) {
         const saltRounds = 8;
         const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-        const user = await User.create({
+        await User.create({
             name: name.trim(),
             email: normalizedEmail,
             password: hashedPassword,
@@ -57,20 +57,12 @@ async function register(req, res) {
             active: true
         });
 
-        return res.status(201).json({
-            message: 'Account created successfully',
-            user: {
-                id: user._id,
-                name: user.name,
-                email: user.email,
-                role: user.role
-            }
-        });
+        // ✅ Redirect to login page on success
+        return res.redirect('/login');
     } catch (err) {
         console.error(err);
-
-        return res.status(500).json({
-            error: 'Server error'
+        return res.status(500).render('register', {
+            error: 'Server error. Please try again later.'
         });
     }
 }
@@ -85,7 +77,7 @@ async function login(req, res) {
             !password ||
             password.length < 6
         ) {
-            return res.status(400).json({
+            return res.status(400).render('login', {
                 error: 'Please provide a valid email and password'
             });
         }
@@ -97,13 +89,13 @@ async function login(req, res) {
         }).select('+password');
 
         if (!user) {
-            return res.status(401).json({
+            return res.status(401).render('login', {
                 error: 'Invalid email or password'
             });
         }
 
         if (!user.active) {
-            return res.status(403).json({
+            return res.status(403).render('login', {
                 error: 'This account has been disabled'
             });
         }
@@ -111,7 +103,7 @@ async function login(req, res) {
         const isMatch = await bcrypt.compare(password, user.password);
 
         if (!isMatch) {
-            return res.status(401).json({
+            return res.status(401).render('login', {
                 error: 'Invalid email or password'
             });
         }
@@ -125,20 +117,16 @@ async function login(req, res) {
             maxAge: 60 * 60 * 1000
         });
 
-        return res.status(200).json({
-            message: 'Login successful',
-            user: {
-                id: user._id,
-                name: user.name,
-                email: user.email,
-                role: user.role
-            }
-        });
+        // Redirect based on role
+        if (user.role === 'admin') {
+            return res.redirect('/admin/dashboard');
+        } else {
+            return res.redirect('/');
+        }
     } catch (err) {
         console.error(err);
-
-        return res.status(500).json({
-            error: 'Server error'
+        return res.status(500).render('login', {
+            error: 'Server error. Please try again later.'
         });
     }
 }

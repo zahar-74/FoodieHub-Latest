@@ -1,6 +1,6 @@
 /* ============================================
    MARWAN: VALIDATION.JS - All Form Validation
-   (Now uses inline errors and real form submission)
+   (Now acts as the single source of truth for submissions)
 ============================================ */
 
 function clearAllErrors() {
@@ -16,7 +16,7 @@ function validateLogin() {
 
     const email = document.getElementById('login-email');
     const password = document.getElementById('login-password');
-    const emailPattern = /^[^\s@]+@[^\s@]+\.[a-z]{2,3}$/;
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[a-z]{2,6}$/; // ✅ fixed TLD length
 
     if (!email || !emailPattern.test(email.value)) {
         const error = document.getElementById('login-email-error');
@@ -32,7 +32,7 @@ function validateLogin() {
         valid = false;
     }
 
-    return valid; // If valid, form submits normally
+    return valid;
 }
 
 // --- REGISTER ---
@@ -43,7 +43,7 @@ function validateRegister() {
     const name = document.getElementById('register-name');
     const email = document.getElementById('register-email');
     const password = document.getElementById('register-password');
-    const emailPattern = /^[^\s@]+@[^\s@]+\.[a-z]{2,3}$/;
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[a-z]{2,6}$/; // ✅ fixed TLD length
 
     if (!name || name.value.trim() === '') {
         const error = document.getElementById('register-name-error');
@@ -69,8 +69,9 @@ function validateRegister() {
     return valid;
 }
 
-// --- CHECKOUT ---
-function validateCheckout() {
+// --- CHECKOUT (validation + submission) ---
+async function handleCheckout(e) {
+    e.preventDefault();
     clearAllErrors();
     let valid = true;
 
@@ -95,22 +96,56 @@ function validateCheckout() {
         }
     }
 
-    // Cart validation – check if cart is empty
     if (typeof cart !== 'undefined' && cart.length === 0) {
         const cartError = document.getElementById('cart-error');
-        if (cartError) cartError.textContent = 'Your cart is empty. Add items before checkout.';
+        if (cartError) cartError.textContent = 'Your cart is empty.';
         valid = false;
     }
 
-    return valid; // If valid, form submits normally
+    if (!valid) return false;
+
+    // --- Submit order ---
+    const items = cart.map(item => ({
+        menuItemId: item.menuItemId,
+        quantity: item.quantity,
+        customizations: item.customizations || ''
+    }));
+
+    const scheduledFor = document.getElementById('schedule-time').value || null;
+
+    try {
+        const response = await fetch('/orders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ items, scheduledFor, deliveryAddress: address.value.trim() })
+        });
+
+        if (!response.ok) {
+            const data = await response.json();
+            alert(data.error || 'Order failed');
+            return;
+        }
+
+        const order = await response.json();
+        cart = [];
+        saveCart();
+        updateCartUI();
+        window.location.href = `/orders/${order._id}/track`;
+    } catch (err) {
+        console.error(err);
+        alert('Could not place order. Please try again.');
+    }
 }
 
-// --- ADMIN: ADD/EDIT MENU ITEM ---
-function validateAddItem() {
+// --- ADMIN: ADD/EDIT MENU ITEM (validation + submission) ---
+async function handleAddItem(e) {
+    e.preventDefault();
     clearAllErrors();
     let valid = true;
 
     const name = document.getElementById('item-name');
+    const description = document.getElementById('item-description');
     const price = document.getElementById('item-price');
     const stock = document.getElementById('item-stock');
 
@@ -118,6 +153,13 @@ function validateAddItem() {
         const error = document.getElementById('item-name-error');
         if (error) error.textContent = 'Item name is required.';
         if (name) name.classList.add('invalid');
+        valid = false;
+    }
+
+    if (!description || description.value.trim() === '') {
+        const error = document.getElementById('item-description-error');
+        if (error) error.textContent = 'Description is required.';
+        if (description) description.classList.add('invalid');
         valid = false;
     }
 
@@ -135,7 +177,40 @@ function validateAddItem() {
         valid = false;
     }
 
-    return valid;
+    if (!valid) return false;
+
+    // --- Submit new item ---
+    const newItem = {
+        name: name.value.trim(),
+        description: description.value.trim(),
+        price: parseFloat(price.value),
+        category: document.getElementById('item-category').value,
+        available: true,
+        dietaryTags: [],
+        imageUrl: ''
+    };
+
+    try {
+        const res = await fetch('/menu/admin/menu-items', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newItem)
+        });
+
+        if (!res.ok) {
+            const data = await res.json();
+            alert(data.error || 'Could not add item');
+            return;
+        }
+
+        alert('Item added successfully!');
+        document.getElementById('add-item-form').reset();
+        renderMenuTable();
+        if (typeof loadMenuItems === 'function') loadMenuItems();
+    } catch (err) {
+        console.error(err);
+        alert('Could not add item');
+    }
 }
 
 // --- WIRE UP FORMS ---
@@ -147,12 +222,8 @@ document.addEventListener('DOMContentLoaded', function () {
     if (registerForm) registerForm.onsubmit = validateRegister;
 
     const checkoutForm = document.getElementById('checkout-form');
-    if (checkoutForm) checkoutForm.onsubmit = validateCheckout;
+    if (checkoutForm) checkoutForm.onsubmit = handleCheckout; // ✅ now calls validation + submit
 
     const addItemForm = document.getElementById('add-item-form');
-    if (addItemForm) addItemForm.onsubmit = validateAddItem;
-
-    // Also wire up admin menu edit form if it exists (for admin-menu-manage.ejs)
-    const editItemForm = document.getElementById('edit-item-form');
-    if (editItemForm) editItemForm.onsubmit = validateAddItem;
+    if (addItemForm) addItemForm.onsubmit = handleAddItem; // ✅ now calls validation + submit
 });

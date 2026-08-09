@@ -77,7 +77,6 @@ async function renderAdminTables() {
 
 async function updateOrderStatus(orderId) {
     try {
-        // Get current status from the table or ask user
         const newStatus = prompt('Enter new status (Placed, Preparing, Out for Delivery, Delivered):');
         if (!newStatus) return;
         const validStatuses = ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'];
@@ -149,7 +148,6 @@ async function renderMenuTable() {
 
 async function editMenuItem(itemId) {
     try {
-        // Fetch current item data
         const response = await fetch(`/menu/${itemId}`);
         if (!response.ok) {
             alert('Item not found');
@@ -157,10 +155,11 @@ async function editMenuItem(itemId) {
         }
         const item = await response.json();
 
-        // Prompt for new values
         const newName = prompt('Edit item name:', item.name) || item.name;
         const newDesc = prompt('Edit item description:', item.description) || item.description;
-        const newPrice = parseFloat(prompt('Edit item price:', item.price)) || item.price;
+        // ✅ Fix: allow price 0 by checking if user explicitly cancels (null)
+        const priceInput = prompt('Edit item price:', item.price);
+        const newPrice = priceInput !== null ? parseFloat(priceInput) : item.price;
         const newCategory = prompt('Edit item category:', item.category) || item.category;
         const newAvailable = confirm('Is this item available? Click OK for Yes, Cancel for No.');
 
@@ -174,7 +173,7 @@ async function editMenuItem(itemId) {
             imageUrl: item.imageUrl || ''
         };
 
-        const updateResponse = await fetch(`/admin/menu-items/${itemId}`, {
+        const updateResponse = await fetch(`/menu/admin/menu-items/${itemId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(updatedItem)
@@ -188,7 +187,6 @@ async function editMenuItem(itemId) {
 
         alert('Item updated successfully!');
         renderMenuTable();
-        // Also update the main menu if fetch.js is used
         if (typeof loadMenuItems === 'function') loadMenuItems();
     } catch (err) {
         console.error(err);
@@ -199,7 +197,7 @@ async function editMenuItem(itemId) {
 async function deleteMenuItem(itemId) {
     if (!confirm('Are you sure you want to delete this item?')) return;
     try {
-        const response = await fetch(`/admin/menu-items/${itemId}`, {
+        const response = await fetch(`/menu/admin/menu-items/${itemId}`, {
             method: 'DELETE'
         });
 
@@ -218,7 +216,7 @@ async function deleteMenuItem(itemId) {
     }
 }
 
-// ===== ORDER TRACKING POLLING (REAL) =====
+// ===== ORDER TRACKING POLLING =====
 let trackingInterval = null;
 
 function startTracking(orderId) {
@@ -226,7 +224,6 @@ function startTracking(orderId) {
     const steps = document.querySelectorAll('.step');
     if (!statusText) return;
 
-    // Function to fetch current status
     async function fetchStatus() {
         try {
             const response = await fetch(`/orders/${orderId}/status`);
@@ -236,7 +233,6 @@ function startTracking(orderId) {
             const data = await response.json();
             const currentStatus = data.status || 'Placed';
 
-            // Update text and stepper
             statusText.textContent = currentStatus;
             const statuses = ['Placed', 'Preparing', 'Out for Delivery', 'Delivered'];
             const idx = statuses.indexOf(currentStatus);
@@ -252,7 +248,6 @@ function startTracking(orderId) {
                 });
             }
 
-            // Stop polling when delivered
             if (currentStatus === 'Delivered') {
                 clearInterval(trackingInterval);
                 trackingInterval = null;
@@ -262,22 +257,20 @@ function startTracking(orderId) {
         }
     }
 
-    // Poll every 3 seconds
-    fetchStatus(); // initial fetch
+    fetchStatus();
     trackingInterval = setInterval(fetchStatus, 3000);
 }
 
 // ===== DOM INIT =====
 document.addEventListener('DOMContentLoaded', function () {
-    toggleAdminLinks();
+    loadCurrentUser();   // from auth-status.js
     renderMenuTable();
 
-    // If on tracking page, start polling
     const statusText = document.getElementById('status-text');
     if (statusText) {
-        // Get orderId from URL or hidden input
-        const orderId = window.location.pathname.split('/').pop(); // e.g., /track/123 -> 123
-        if (orderId && orderId !== 'track') {
+        const orderIdEl = document.getElementById('order-id');
+        const orderId = orderIdEl ? orderIdEl.textContent.trim() : null;
+        if (orderId) {
             startTracking(orderId);
         } else {
             statusText.textContent = 'No order ID found';

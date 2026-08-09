@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FoodieHub — Manage Menu</title>
-    <link rel="stylesheet" href="/public/css/styles.css">
+    <link rel="stylesheet" href="/css/styles.css">
 </head>
 
 <body>
@@ -13,10 +13,11 @@
         <nav>
             <div class="logo">FoodieHub Admin</div>
             <ul class="nav-links">
-                <li><a href="admin-dashboard.html">Dashboard</a></li>
-                <li><a href="admin-orders.html">Manage Orders</a></li>
-                <li><a href="admin-menu-manage.html">Manage Menu</a></li>
-                <li><a href="index.html">View Site</a></li>
+                <li><a href="/admin/dashboard">Dashboard</a></li>
+                <li><a href="/admin/orders">Manage Orders</a></li>
+                <li><a href="/admin-menu-manage">Manage Menu</a></li>
+                <li><a href="/">View Site</a></li>
+                <li id="nav-logout-item" style="display:none;"><a href="/logout">Logout</a></li>
             </ul>
         </nav>
     </header>
@@ -26,15 +27,22 @@
 
         <section>
             <h2>Add New Item</h2>
-            <form id="add-item-form" onsubmit="return validateAddItem()">
+            <form id="add-item-form">
                 <label for="item-name">Name:</label>
-                <input type="text" id="item-name" placeholder="e.g., Pepperoni Pizza">
+                <input type="text" id="item-name" placeholder="e.g., Pepperoni Pizza" required>
+                <span id="item-name-error" class="error-message"></span>
+
+                <label for="item-description">Description:</label>
+                <textarea id="item-description" placeholder="Describe the item" required></textarea>
+                <span id="item-description-error" class="error-message"></span>
 
                 <label for="item-price">Price ($):</label>
-                <input type="number" id="item-price" step="0.01" placeholder="9.99">
+                <input type="number" id="item-price" step="0.01" placeholder="9.99" required>
+                <span id="item-price-error" class="error-message"></span>
 
                 <label for="item-stock">Stock:</label>
-                <input type="number" id="item-stock" placeholder="50">
+                <input type="number" id="item-stock" placeholder="50" required>
+                <span id="item-stock-error" class="error-message"></span>
 
                 <label for="item-category">Category:</label>
                 <select id="item-category">
@@ -72,11 +80,12 @@
         <p>&copy; 2026 FoodieHub Admin</p>
     </footer>
 
-    <script src="/public/js/menu.js"></script>
-    <script src="/public/js/cart.js"></script>
-    <script src="/public/js/validation.js"></script>
-    <script src="/public/js/admin.js"></script>
-    <script src="/public/js/fetch.js"></script>
+    <script src="/js/menu.js"></script>
+    <script src="/js/cart.js"></script>
+    <script src="/js/validation.js"></script>
+    <script src="/js/admin.js"></script>
+    <script src="/js/fetch.js"></script>
+    <script src="/js/auth-status.js"></script>
 </body>
 
 </html>

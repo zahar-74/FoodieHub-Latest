@@ -4,37 +4,66 @@
 
 let cart = [];
 
+// Load cart from localStorage on page load
+function loadCart() {
+    try {
+        const stored = localStorage.getItem('cart');
+        cart = stored ? JSON.parse(stored) : [];
+    } catch (e) {
+        cart = [];
+    }
+    // Ensure cart is always an array
+    if (!Array.isArray(cart)) cart = [];
+}
+
+function saveCart() {
+    localStorage.setItem('cart', JSON.stringify(cart));
+}
+
+// Call loadCart on module load
+loadCart();
+
 function addToCart(menuItem, quantity = 1, customizations = '') {
     if (!menuItem) return;
-    const existingItem = cart.find(item => item.menuItemId === menuItem.id);
+    const existingItem = cart.find(item => item.menuItemId === menuItem._id);
     if (existingItem) {
         existingItem.quantity += quantity;
     } else {
         cart.push({
             cartItemId: 'c' + Date.now(),
-            menuItemId: menuItem.id,
+            menuItemId: menuItem._id,
             name: menuItem.name,
             price: menuItem.price,
             quantity: quantity,
             customizations: customizations || ''
         });
     }
+    saveCart();
     updateCartUI();
 }
 
 function removeFromCart(cartItemId) {
     cart = cart.filter(item => item.cartItemId !== cartItemId);
+    saveCart();
     updateCartUI();
 }
 
 function updateQuantity(cartItemId, newQuantity) {
     const item = cart.find(i => i.cartItemId === cartItemId);
     if (!item) return;
-    if (newQuantity <= 0) {
+    // ✅ Handle NaN, empty, or invalid input
+    const qty = parseInt(newQuantity);
+    if (isNaN(qty) || qty < 1) {
+        // If invalid, remove the item or reset to 1? We'll remove it.
         removeFromCart(cartItemId);
         return;
     }
-    item.quantity = newQuantity;
+    if (qty <= 0) {
+        removeFromCart(cartItemId);
+        return;
+    }
+    item.quantity = qty;
+    saveCart();
     updateCartUI();
 }
 
@@ -85,15 +114,22 @@ function updateCartUI() {
     renderCartItems();
 }
 
+// ===== ORDER HISTORY =====
+async function loadOrderHistory() {
+    try {
+        const response = await fetch('/orders');
+        if (!response.ok) throw new Error('Failed to fetch order history');
+        return await response.json();
+    } catch (err) {
+        console.error('Error loading order history:', err);
+        return [];
+    }
+}
+
 async function renderOrderHistory() {
     const container = document.getElementById('order-history-list');
     if (!container) return;
-
-    // Replace mock data with real API call
-    // For demo, you might pass a customerId from session or use a default
-    const customerId = sessionStorage.getItem('customerId') || '...'; // implement this
-    const orders = await loadOrderHistory(customerId);
-
+    const orders = await loadOrderHistory();
     if (!orders || orders.length === 0) {
         container.innerHTML = '<p>You have no past orders.</p>';
         return;
@@ -113,22 +149,9 @@ async function renderOrderHistory() {
     });
     container.innerHTML = html;
 }
-async function loadOrderHistory(customerId) {
-    try {
-        const response = await fetch(`/orders?customerId=${customerId}`);
-        if (!response.ok) {
-            throw new Error('Failed to fetch order history');
-        }
-        const orders = await response.json();
-        return orders;
-    } catch (err) {
-        console.error('Error loading order history:', err);
-        return [];
-    }
-}
+
 async function reorder(orderId) {
     try {
-        // Fetch the order details
         const response = await fetch(`/orders/${orderId}`);
         if (!response.ok) {
             alert('Order not found');
@@ -136,9 +159,7 @@ async function reorder(orderId) {
         }
         const order = await response.json();
 
-        // Add each item to cart
         order.items.forEach(item => {
-            // Find the menu item by ID from global store
             const menuItem = window.menuItems?.find(i => i._id === item.menuItem?._id);
             if (menuItem) {
                 addToCart(menuItem, item.quantity, item.customizations || '');
@@ -148,19 +169,22 @@ async function reorder(orderId) {
         });
 
         alert('Items added to cart!');
-        window.location.href = 'cart.html';
+        window.location.href = '/cart';
     } catch (err) {
         console.error(err);
         alert('Could not reorder');
     }
 }
 
+// ===== DOM INIT =====
 document.addEventListener('DOMContentLoaded', function () {
     updateCartUI();
     renderOrderHistory();
 });
 
+// Expose functions globally
 window.addToCart = addToCart;
 window.removeFromCart = removeFromCart;
 window.updateQuantity = updateQuantity;
 window.reorder = reorder;
+window.renderOrderHistory = renderOrderHistory;
